@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Equipe · Mostra em Descoberta</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/infinite.js"></script>
+</head>
+<body>
+<header><h1>🔬 Mostra em Descoberta · Área da equipe</h1><small>Acompanhe as avaliações do seu projeto em tempo real</small></header>
+<div id="alertas"></div>
+<main id="app"><p class="muted">Carregando…</p></main>
+<script>
+const app = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const token = decodeURIComponent(location.pathname.split('/')[2] || '');
+let inf = null, versao = null, alertasVistos = new Set();
+
+function beep() {
+  try { const a = new AudioContext(), o = a.createOscillator(); o.connect(a.destination); o.frequency.value = 880; o.start(); o.stop(a.currentTime + .35); } catch {}
+}
+
+function renderAlertas(list) {
+  const box = document.getElementById('alertas');
+  box.innerHTML = list.map(a => `<div class="busalert" role="alert">
+    <div class="bi" aria-hidden="true">🚌</div>
+    <div><b>Chamada para o ônibus: ${esc(a.escola)}${a.turma ? ' · turma ' + esc(a.turma) : ''}</b>
+    <div>${esc(a.message)}</div>
+    <small>Se houver visitantes dessa escola no seu estande, peça que retornem ao ônibus. Chamado às ${esc(a.created.slice(11, 16))}.</small></div></div>`).join('');
+  if (list.some(a => !alertasVistos.has(a.id))) beep();
+  alertasVistos = new Set(list.map(a => a.id));
+}
+
+async function load() {
+  const r = await fetch('/api/equipe/' + encodeURIComponent(token));
+  const d = await r.json();
+  if (r.status !== 200) { app.innerHTML = `<div class="msg err">${esc(d.erro)}</div>`; return; }
+  renderAlertas(d.alertas);
+  const v = d.avaliacoes + '|' + d.title + '|' + d.location;
+  if (v === versao) return;
+  versao = v;
+  const max = 5;
+  app.innerHTML = `
+  <div class="card">
+    <div class="muted">${esc(d.course) || ''}${d.team ? ' · ' + esc(d.team) : ''}</div>
+    <h2>${esc(d.title)}</h2>
+    <div class="muted">📍 ${esc(d.location) || 'local a definir'}</div>
+  </div>
+  <div class="card">
+    <div class="row">
+      <div class="kpi"><b>${d.avaliacoes}</b>avaliações recebidas</div>
+      <div class="kpi"><b>${d.media_geral ?? '—'}</b>média geral (1 a 5)</div>
+      <div class="kpi"><b>${d.soma}</b>soma dos pontos</div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Média por critério</h2>
+    ${d.criteria.map((c, i) => { const m = d.media_criterios[i]; return `<div style="margin:10px 0">
+      <div class="row" style="justify-content:space-between"><span>${esc(c)}</span><b>${m ?? '—'}</b></div>
+      <div class="bar" role="img" aria-label="${esc(c)}: média ${m ?? 'sem dados'} de 5"><div style="width:${m ? m / max * 100 : 0}%"></div></div></div>`; }).join('')}
+    <p class="muted">Use as médias para entender como o público percebeu o projeto. Não peça notas aos visitantes: explique o trabalho e deixe que avaliem livremente.</p>
+  </div>
+  <div class="card">
+    <h2>Avaliações recebidas</h2>
+    <p class="muted">As mais recentes primeiro. Os visitantes são anônimos.</p>
+    <div id="lista"></div>
+  </div>
+  <p class="muted" style="text-align:center">Atualiza sozinho a cada 5 segundos · o ranking não é exibido durante a mostra.</p>`;
+  inf = infiniteList(document.getElementById('lista'), d.registros, (r, ) => `<div class="urow" style="grid-template-columns:70px 1fr 90px;cursor:default">
+      <span class="muted">${esc(r.created.slice(11, 16))}</span>
+      <span>${d.criteria.map((c, i) => `<span title="${esc(c)}">${esc(c.split(' ')[0])}: <b>${r.scores[i]}</b></span>`).join(' · ')}</span>
+      <span><b>${r.total}</b> pts</span></div>`,
+    { batch: 20, empty: '<p class="muted">Nenhuma avaliação ainda. Elas aparecem aqui assim que forem enviadas.</p>' });
+}
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

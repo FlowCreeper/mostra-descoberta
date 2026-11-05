@@ -1,0 +1,581 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Organização · Mostra</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/infinite.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body>
+<header><h1>🔬 Mostra em Descoberta · Organização</h1><small>Uso restrito: não exibir resultados ao público durante a mostra</small></header>
+<div id="alertbar" class="noprint"></div>
+<main class="wide" id="app"></main>
+<div id="modal"></div>
+<script>
+const app = document.getElementById('app');
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const PER_PAGE = 10;
+let PIN = sessionStorage.getItem('pin') || '';
+let tab = 'indicador';
+let montPage = 0;
+let rankCourse = '';
+let montCourse = '';
+let emitidos = [];
+async function api(url, opts = {}) {
+  const r = await fetch(url, { ...opts, headers: { 'Content-Type': 'application/json', 'X-Admin-Pin': PIN } });
+  return { status: r.status, data: await r.json() };
+}
+// seleção por botões (evita <select>, que falha em alguns navegadores embutidos)
+const courseOpts = (courses, extra = true) => [['', 'Todos os cursos'], ...courses.map(x => [String(x.id), x.name]), ...(extra ? [['none', 'Sem curso']] : [])];
+const chips = (name, opts, selected, radio = false) => `<div class="chips" role="${radio ? 'radiogroup' : 'group'}">${opts.map(([v, l]) => radio
+  ? `<label class="chip"><input type="radio" name="${name}" value="${esc(v)}" ${v === selected ? 'checked' : ''}><span>${esc(l)}</span></label>`
+  : `<button type="button" class="chip-btn ${v === selected ? 'on' : ''}" data-${name}="${esc(v)}" aria-pressed="${v === selected}">${esc(l)}</button>`).join('')}</div>`;
+const qr = (el, text, size = 130) => { if (window.QRCode) new QRCode(el, { text, width: size, height: size }); };
+
+// ---------- Modal ----------
+function openModal(html, onReady, onClose) {
+  const m = document.getElementById('modal');
+  m.innerHTML = `<div class="modal-bg"><div class="modal" role="dialog" aria-modal="true"><button class="x" aria-label="Fechar">✕</button><div id="mb">${html}</div></div></div>`;
+  const close = () => { if (!m.innerHTML) return; m.innerHTML = ''; document.removeEventListener('keydown', onKey); onClose && onClose(); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  m.querySelector('.x').onclick = close;
+  m.querySelector('.modal-bg').onclick = e => { if (e.target.classList.contains('modal-bg')) close(); }
+  onReady && onReady(m.querySelector('#mb'), close);
+}
+const pager = (page, total, cls) => total <= 1 ? '' : `<div class="pager">
+  <button class="sec ${cls}" data-p="${page - 1}" ${page === 0 ? 'disabled' : ''}>← Anterior</button>
+  <span>${page + 1} de ${total}</span>
+  <button class="sec ${cls}" data-p="${page + 1}" ${page >= total - 1 ? 'disabled' : ''}>Próximo →</button></div>`;
+
+// ---------- Teclado de PIN (funciona com toque, mouse ou teclado físico) ----------
+function keypad(el, { title, hint = '', button = 'Entrar', onSubmit, autofocus = true }) {
+  let val = '';
+  el.innerHTML = `<h2>${title}</h2>${hint ? `<p class="muted">${hint}</p>` : ''}
+    <div class="pin-dots" aria-live="polite"></div>
+    <input class="pin-input" type="password" inputmode="numeric" autocomplete="off" maxlength="8" aria-label="${title}">
+    <div class="keys">${[1,2,3,4,5,6,7,8,9].map(n => `<button type="button" data-k="${n}">${n}</button>`).join('')}
+      <button type="button" class="sec" data-k="del" aria-label="Apagar">⌫</button><button type="button" data-k="0">0</button>
+      <button type="button" data-k="ok">${button}</button></div><div class="kp-msg"></div>`;
+  const dots = el.querySelector('.pin-dots'), input = el.querySelector('.pin-input');
+  const draw = () => { dots.textContent = val ? '●'.repeat(val.length) : '— — — —'; input.value = val; };
+  const submit = () => val && onSubmit(val, msg => { el.querySelector('.kp-msg').innerHTML = msg; val = ''; draw(); });
+  el.querySelectorAll('[data-k]').forEach(b => b.onclick = () => {
+    const k = b.dataset.k;
+    if (k === 'del') val = val.slice(0, -1); else if (k === 'ok') return submit(); else if (val.length < 8) val += k;
+    draw(); input.focus({ preventScroll: true });
+  });
+  input.oninput = () => { val = input.value.replace(/\D/g, '').slice(0, 8); draw(); };
+  input.onkeydown = e => { if (e.key === 'Enter') submit(); }
+  draw(); if (autofocus) input.focus({ preventScroll: true });
+}
+
+// ---------- Login ----------
+function login(err = '') {
+  app.innerHTML = `<div class="card" style="max-width:340px;margin:30px auto" id="lg"></div>`;
+  keypad(document.getElementById('lg'), { title: 'Acesso da organização', hint: 'Digite o PIN pelo teclado ou tocando nos números.', onSubmit: async (v, fail) => {
+    PIN = v; const { status } = await api('/api/admin/indicador');
+    if (status === 200) { sessionStorage.setItem('pin', PIN); render(); } else fail('<div class="msg err">PIN inválido</div>');
+  } });
+  if (err) document.querySelector('#lg .kp-msg').innerHTML = `<div class="msg err">${err}</div>`;
+}
+
+async function render() {
+  clearInterval(pollTimer);
+  checarAlertas();
+  const tabs = [['indicador', 'Indicadores'], ['passaportes', 'Passaportes'], ['escolas', '🏫 Escolas / ônibus'], ['ranking', 'Ranking'], ['cursos', 'Cursos'], ['montagem', 'Montagem avaliativa'], ['cartazes', 'Cartazes / QR']];
+  app.innerHTML = `<div class="tabs noprint">${tabs.map(([k, l]) => `<button class="${k === tab ? 'active' : ''}" data-t="${k}">${l}</button>`).join('')}
+    <button class="sec" id="reload">↻ Atualizar</button></div><div id="c">Carregando…</div>`;
+  app.querySelectorAll('[data-t]').forEach(b => b.onclick = () => { tab = b.dataset.t; render(); });
+  document.getElementById('reload').onclick = render;
+  const c = document.getElementById('c');
+  const need = { indicador: ['/api/admin/indicador'], passaportes: ['/api/admin/passports', '/api/admin/projects'],
+    ranking: ['/api/admin/projects', '/api/admin/settings', '/api/admin/courses'], cursos: ['/api/admin/courses'], escolas: ['/api/admin/schools'], montagem: ['/api/admin/projects', '/api/admin/courses'], cartazes: ['/api/admin/projects'] }[tab];
+  const res = await Promise.all(need.map(u => api(u)));
+  if (res.some(r => r.status === 401)) return login('Sessão expirada');
+  ({ indicador, passaportes, escolas, ranking, cursos, montagem, cartazes })[tab](c, ...res.map(r => r.data));
+}
+
+// ---------- Indicadores + regras de reconhecimento ----------
+function indicador(c, d) {
+  c.innerHTML = `<div class="card"><h2>Indicador principal</h2>
+    <div class="row">
+      <div class="kpi"><b>${d.percentual}%</b>visitantes com 3+ avaliações<br><span class="muted">meta hipotética: ${d.meta_percentual}%</span></div>
+      <div class="kpi"><b>${d.concluiram}</b>concluíram o desafio</div>
+      <div class="kpi"><b>${d.visitantes}</b>passaportes emitidos</div>
+      <div class="kpi"><b>${d.avaliacoes}</b>avaliações válidas</div>
+    </div>
+    <div class="bar" style="margin-top:14px"><div style="width:${d.percentual}%"></div></div>
+    <p class="muted">Fórmula: (visitantes com 3 ou mais avaliações válidas ÷ total de passaportes emitidos) × 100.</p></div>
+  <form class="card" id="cfg"><h2>Regras para o reconhecimento</h2>
+    <p class="muted">Um projeto concorre se atingir <b>qualquer uma</b> das duas regras. Assim um projeto pouco visitado, mas muito bem avaliado, não fica de fora. Defina as regras antes da mostra.</p>
+    <div class="row">
+      <div style="flex:1;min-width:200px"><label>Mínimo de avaliações</label><input name="min_avaliacoes" type="number" min="1" value="${d.min_avaliacoes}"></div>
+      <div style="flex:1;min-width:200px"><label>OU média geral mínima (1 a 5)</label><input name="nota_minima" type="number" min="1" max="5" step="0.1" value="${d.nota_minima}"></div>
+    </div><div id="cm"></div><br><button>Salvar regras</button></form>
+  <div class="card" style="max-width:340px" id="pinbox"></div>`;
+  let first = null;
+  const askNew = (msg = '') => {
+    keypad(document.getElementById('pinbox'), { title: '🔑 Trocar PIN', hint: 'Digite o novo PIN (4 a 8 números).', button: 'Seguir', autofocus: false, onSubmit: v => {
+      if (!/^\d{4,8}$/.test(v)) return askNew('<div class="msg err">Use de 4 a 8 números.</div>');
+      first = v; askConfirm();
+    } });
+    document.querySelector('#pinbox .kp-msg').innerHTML = msg;
+  };
+  const askConfirm = () => keypad(document.getElementById('pinbox'), { title: '🔑 Confirme o novo PIN', hint: 'Digite o mesmo PIN de novo.', button: 'Salvar', onSubmit: async v => {
+    if (v !== first) return askNew('<div class="msg err">Os PINs não conferem. Tente de novo.</div>');
+    const { status, data } = await api('/api/admin/pin', { method: 'POST', body: JSON.stringify({ nova: v }) });
+    if (status !== 200) return askNew(`<div class="msg err">${esc(data.erro)}</div>`);
+    PIN = v; sessionStorage.setItem('pin', v);
+    askNew('<div class="msg ok">PIN alterado! Use o novo PIN no próximo acesso.</div>');
+  } });
+  askNew();
+  document.getElementById('cfg').onsubmit = async e => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const { status, data } = await api('/api/admin/settings', { method: 'POST', body: JSON.stringify({ min_avaliacoes: +fd.get('min_avaliacoes'), nota_minima: +fd.get('nota_minima') }) });
+    document.getElementById('cm').innerHTML = status === 200 ? '<div class="msg ok">Regras salvas.</div>' : `<div class="msg err">${esc(data.erro)}</div>`;
+  };
+}
+
+// ---------- Passaportes: emissão + registros ----------
+let pollTimer = null;
+function passaportes(c, list, projects) {
+  const crit = Object.fromEntries(projects.map(p => [p.code, p.criteria]));
+  const q = sessionStorage.getItem('qp') || '';
+  c.innerHTML = `<div class="card noprint"><h2>Emitir passaportes</h2>
+      <p class="muted">Só a organização emite passaportes. Gere os cartões e imprima, ou entregue pelo QR na tela (abra um passaporte disponível).</p>
+      <div class="row"><input id="qtd" type="number" min="1" max="500" value="20" style="width:120px"><button id="emit">Gerar passaportes</button>
+      ${emitidos.length ? '<button class="sec" onclick="print()">🖨 Imprimir cartões gerados</button>' : ''}</div></div>
+    ${emitidos.length ? `<div class="card"><h2 class="noprint">${emitidos.length} cartões gerados agora</h2><div class="pcards">${emitidos.map(code => `
+      <div class="pass"><b>🔬 Mostra em Descoberta</b><div class="muted">Passaporte de descoberta</div>
+      <div class="qr" data-url="${location.origin}/?p=${code}" style="display:inline-block;margin:6px"></div>
+      <div class="code" style="font-size:1.2rem">${code}</div><div class="muted">Avalie 3 projetos e ganhe o selo!</div></div>`).join('')}</div></div>` : ''}
+    <div class="card noprint"><div class="row"><input id="q" placeholder="Buscar por código MD-…, escola ou turma" value="${esc(q)}" style="flex:1">
+      <span class="live" title="Atualiza sozinho a cada 2 segundos">● ao vivo</span></div></div>
+    <div class="card noprint"><div class="row" style="justify-content:space-between"><h2 id="hd" style="margin:0"></h2>
+      <button id="next">▶ Entregar próximo disponível</button></div>
+      <p class="muted">Clique em um passaporte para abrir o QR. Ao abrir, ele fica reservado por alguns minutos para nenhum outro atendente entregar o mesmo.</p>
+      <div id="disp"></div></div>
+    <div class="card noprint"><h2 id="hu"></h2><p class="muted">Clique para ver os registros e selos. Mais recentes primeiro.</p><div id="uso"></div></div>`;
+  c.querySelectorAll('.qr').forEach(el => qr(el, el.dataset.url, 110));
+  document.getElementById('emit').onclick = async () => {
+    const { status, data } = await api('/api/passports', { method: 'POST', body: JSON.stringify({ quantidade: +document.getElementById('qtd').value }) });
+    if (status === 201) { emitidos = data.codes; render(); }
+  };
+  const ordemDisp = (a, b) => a.emitido.localeCompare(b.emitido) || a.code.localeCompare(b.code);
+  let infDisp = null, infUso = null;
+  const fill = () => {
+    const f = document.getElementById('q').value.trim().toUpperCase(); sessionStorage.setItem('qp', f);
+    const match = list.filter(p => p.code.includes(f) || (p.escola || '').toUpperCase().includes(f) || (p.turma || '').toUpperCase().includes(f));
+    const disp = match.filter(p => !p.ativado).sort(ordemDisp);
+    const uso = match.filter(p => p.ativado).sort((a, b) => b.ativado.localeCompare(a.ativado));
+    document.getElementById('hd').textContent = `🎫 Disponíveis (${list.filter(p => !p.ativado).length})`;
+    document.getElementById('hu').textContent = `✅ Em uso (${list.filter(p => p.ativado).length})`;
+    document.getElementById('next').disabled = !list.some(p => !p.ativado && !p.reservado);
+    if (infDisp) { infDisp.update(disp); infUso.update(uso); return; }
+    infDisp = infiniteList(document.getElementById('disp'), disp, p =>
+      `<button class="pcode ${p.reservado ? 'busy' : ''}" data-code="${esc(p.code)}" ${p.reservado ? 'title="Em atendimento em outro painel"' : ''}>${esc(p.code)}${p.reservado ? '<small>em atendimento</small>' : ''}</button>`,
+      { batch: 60, itemsClass: 'avail', empty: '<p class="muted">Nenhum passaporte disponível. Gere mais acima.</p>',
+        onRender: box => box.querySelectorAll('.pcode').forEach(b => b.onclick = () => unusedModal(b.dataset.code)) });
+    infUso = infiniteList(document.getElementById('uso'), uso, p => `<div class="urow" role="button" tabindex="0" data-code="${esc(p.code)}">
+        <span class="code" style="font-size:1rem">${esc(p.code)}</span>
+        <span class="muted">ativado ${esc(p.ativado.slice(11, 16))}${p.escola ? `<br>🏫 ${esc(p.escola)}${p.turma ? ' · ' + esc(p.turma) : ''}` : ''}</span>
+        <span>${p.assinaturas} / ${p.meta}</span>
+        <span>${p.total_selos ? p.selos.filter(b => b.conquistado).map(b => `<span title="${esc(b.name)}">${b.icon}</span>`).join(' ') : '<span class="tag no">sem selos</span>'}</span>
+        <span class="muted">${p.registros.map(r => esc(r.project)).join(', ') || 'nenhuma avaliação'}</span></div>`,
+      { batch: 25, empty: '<p class="muted">Nenhum passaporte em uso ainda.</p>',
+        onRender: box => box.querySelectorAll('.urow').forEach(r => {
+          const open = () => passportModal(list.find(p => p.code === r.dataset.code), crit);
+          r.onclick = open; r.onkeydown = e => { if (e.key === 'Enter') open(); };
+        }) });
+  };
+  document.getElementById('next').onclick = async () => {
+    const r = await api('/api/admin/passports');  // lista fresca, para não pegar um que acabou de ser usado
+    if (r.status === 200) { list = r.data; fill(); }
+    const p = list.filter(p => !p.ativado && !p.reservado).sort(ordemDisp)[0];
+    if (p) unusedModal(p.code); else alert('Nenhum passaporte disponível. Gere mais.');
+  };
+  document.getElementById('q').oninput = fill;
+  fill();
+  // ---- tempo real: consulta leve a cada 2s; só recarrega a lista quando algo muda
+  let versao = null;
+  pollTimer = setInterval(async () => {
+    if (tab !== 'passaportes' || !document.getElementById('disp')) return;
+    const { status, data } = await api('/api/admin/passports/versao');
+    if (status !== 200) return;
+    if (data.versao !== versao) {
+      const r = await api('/api/admin/passports');
+      if (r.status === 200 && document.getElementById('disp')) { list = r.data; fill(); }
+    }
+    versao = data.versao;
+  }, 2000);
+}
+
+let modalPoll = null;
+// ---------- Perfil do visitante: livre ou escola/turma ----------
+// Renderiza no elemento e chama onDone({tipo, school_id, class_id, label}) ao confirmar.
+async function profilePicker(el, atual, onDone, botao = 'Continuar →') {
+  let schools = (await api('/api/admin/schools')).data || [];
+  let tipo = atual && atual.school_id ? 'escola' : (atual ? 'livre' : '');
+  let sid = atual?.school_id ? String(atual.school_id) : '', cid = atual?.class_id ? String(atual.class_id) : '';
+  let erro = '';
+  const draw = () => {
+    const sc = schools.find(x => String(x.id) === sid);
+    if (sc && sc.classes.length === 1) cid = String(sc.classes[0].id);
+    el.innerHTML = `<h2>Quem é o visitante?</h2>
+      ${chips('tp', [['livre', '🙋 Visitante livre'], ['escola', '🏫 Veio com uma escola']], tipo)}
+      ${tipo === 'escola' ? `<div class="step"><b>Escola</b>
+        ${schools.length ? chips('sc', schools.map(x => [String(x.id), x.name]), sid) : '<p class="muted">Nenhuma escola cadastrada ainda.</p>'}
+        <div class="row"><input id="ns" placeholder="Nova escola: nome" style="flex:1"><button type="button" class="sec" id="nsb">+ Cadastrar escola</button></div></div>` : ''}
+      ${tipo === 'escola' && sc ? `<div class="step"><b>Turma</b> <span class="muted">${sc.classes.length > 1 ? '(obrigatório: a escola tem mais de uma turma)' : sc.classes.length ? '(única turma, já selecionada)' : '(opcional)'}</span>
+        ${sc.classes.length ? chips('cl', sc.classes.map(x => [String(x.id), x.name]), cid) : ''}
+        <div class="row"><input id="nc" placeholder="Nova turma: ex. 9º ano A" style="flex:1"><button type="button" class="sec" id="ncb">+ Cadastrar turma</button></div></div>` : ''}
+      ${erro ? `<div class="msg err">${esc(erro)}</div>` : ''}
+      <div class="row" style="margin-top:12px"><button type="button" id="ok" ${!tipo ? 'disabled' : ''}>${botao}</button></div>`;
+    el.querySelectorAll('[data-tp]').forEach(b => b.onclick = () => { tipo = b.dataset.tp; erro = ''; draw(); });
+    el.querySelectorAll('[data-sc]').forEach(b => b.onclick = () => { sid = b.dataset.sc; cid = ''; erro = ''; draw(); });
+    el.querySelectorAll('[data-cl]').forEach(b => b.onclick = () => { cid = b.dataset.cl; erro = ''; draw(); });
+    const add = async (url, payload, after) => {
+      const { status, data } = await api(url, { method: 'POST', body: JSON.stringify(payload) });
+      if (status !== 200) { erro = data.erro; return draw(); }
+      schools = (await api('/api/admin/schools')).data; after(String(data.id)); erro = ''; draw();
+    };
+    const nsb = el.querySelector('#nsb');
+    if (nsb) { const go = () => { const v = el.querySelector('#ns').value.trim(); if (v) add('/api/admin/schools', { name: v }, id => { sid = id; cid = ''; }); };
+      nsb.onclick = go; el.querySelector('#ns').onkeydown = e => { if (e.key === 'Enter') go(); }; }
+    const ncb = el.querySelector('#ncb');
+    if (ncb) { const go = () => { const v = el.querySelector('#nc').value.trim(); if (v) add('/api/admin/classes', { school_id: +sid, name: v }, id => { cid = id; }); };
+      ncb.onclick = go; el.querySelector('#nc').onkeydown = e => { if (e.key === 'Enter') go(); }; }
+    el.querySelector('#ok').onclick = () => {
+      if (tipo === 'escola' && !sid) { erro = 'Selecione ou cadastre a escola.'; return draw(); }
+      if (tipo === 'escola' && sc && sc.classes.length > 1 && !cid) { erro = 'Selecione a turma.'; return draw(); }
+      const turma = sc?.classes.find(x => String(x.id) === cid);
+      onDone({ tipo, school_id: tipo === 'escola' ? +sid : null, class_id: tipo === 'escola' && cid ? +cid : null,
+        label: tipo === 'escola' ? `🏫 ${sc.name}${turma ? ' · ' + turma.name : ''}` : '🙋 Visitante livre' });
+    };
+  };
+  draw();
+}
+
+async function unusedModal(code) {
+  const { status, data } = await api('/api/admin/passports/' + encodeURIComponent(code) + '/reservar', { method: 'POST', body: '{}' });
+  if (status !== 200) return alert(data.erro);
+  const url = `${location.origin}/?p=${code}`;
+  let renew = null;
+  openModal('', (body, close) => {
+    // mantém a reserva enquanto o atendente preenche o perfil
+    renew = setInterval(() => api('/api/admin/passports/' + encodeURIComponent(code) + '/reservar', { method: 'POST', body: '{"renovar":true}' }), 45000);
+    body.innerHTML = `<div class="muted">Passaporte ${esc(code)} · passo 1 de 2</div><div id="pp"></div>`;
+    profilePicker(body.querySelector('#pp'), null, async perfil => {
+      const r = await api('/api/admin/passports/' + encodeURIComponent(code) + '/perfil', { method: 'POST', body: JSON.stringify(perfil) });
+      if (r.status !== 200) return alert(r.data.erro);
+      mostrarQR(perfil);
+    }, 'Gerar QR →');
+    const mostrarQR = perfil => {
+      body.innerHTML = `<div style="text-align:center">
+        <div class="muted">Passo 2 de 2 · mostre o QR ao visitante</div>
+        <div class="code" style="font-size:2rem">${esc(code)}</div>
+        <div><span class="tag ok">${esc(perfil.label)}</span></div>
+        <div id="bigqr" style="display:inline-block;margin:12px;padding:10px;background:#fff"></div>
+        <div class="muted" style="word-break:break-all">${esc(url)}</div>
+        <div id="st" class="msg info">⏳ Aguardando o visitante ler o QR ou digitar o código…</div>
+        <div class="row" style="justify-content:center"><button class="sec" id="prt">🖨 Imprimir este cartão</button></div></div>`;
+      qr(body.querySelector('#bigqr'), url, 260);
+      body.querySelector('#prt').onclick = () => { const w = open('', '_blank'); w.document.write(`<title>${code}</title><body style="text-align:center;font-family:sans-serif">
+        <h2>🔬 Mostra em Descoberta</h2>${body.querySelector('#bigqr').innerHTML}<h1>${code}</h1><p>Avalie 3 projetos e ganhe o selo!</p><script>onload=()=>print()<\/script>`); w.document.close(); };
+      modalPoll = setInterval(async () => {
+        if (!document.getElementById('bigqr')) { clearInterval(modalPoll); return; }
+        const r = await fetch('/api/passports/' + encodeURIComponent(code)).then(r => r.json()).catch(() => null);
+        if (r && r.ativado) {
+          clearInterval(modalPoll);
+          body.querySelector('#st').className = 'msg ok';
+          body.querySelector('#st').innerHTML = `✅ Passaporte ativado às ${esc(r.ativado.slice(11, 16))}! Já pode atender o próximo visitante.
+            <div style="margin-top:8px"><button id="nx">▶ Próximo disponível</button></div>`;
+          body.querySelector('#bigqr').style.opacity = .25;
+          body.querySelector('#nx').onclick = () => { close(); document.getElementById('next')?.click(); };
+        }
+      }, 1500);
+    };
+  }, () => {
+    clearInterval(modalPoll); clearInterval(renew);
+    api('/api/admin/passports/' + encodeURIComponent(code) + '/liberar', { method: 'POST', body: '{}' });
+  });
+}
+
+function passportModal(p, crit) {
+  openModal('', body => {
+    const show = i => {
+      const r = p.registros[i];
+      body.innerHTML = `<div class="muted">Passaporte</div><div class="code">${esc(p.code)}</div>
+        <p>${p.escola ? `🏫 <b>${esc(p.escola)}</b>${p.turma ? ' · turma ' + esc(p.turma) : ''}` : '🙋 Visitante livre'}
+          <button class="sec" id="edp" style="padding:4px 10px;margin-left:6px">Alterar</button>
+          ${p.bloqueado ? '<span class="tag" style="background:#fff1c2;color:#4a3500">🚌 chamado ao ônibus · avaliações pausadas</span>' : ''}</p>
+        <p>${p.assinaturas} assinatura(s) · ${p.concluido ? '<span class="tag ok">🏅 Conheça três</span>' : '<span class="tag no">desafio em andamento</span>'}</p>
+        <p>Selos (${p.total_selos}): ${p.selos.filter(b => b.conquistado).map(b => `<span class="tag ok" title="${esc(b.desc)}">${b.icon} ${esc(b.name)}</span>`).join(' ') || '<span class="muted">nenhum</span>'}</p>
+        ${!r ? '<p class="muted">Este passaporte ainda não fez nenhuma avaliação.</p>' : `
+        <div class="card" style="box-shadow:none;border:1px solid #d5dfe0">
+          <div class="muted">Registro ${i + 1} · ${esc(r.created)}</div>
+          <h2>${esc(r.project)} · ${esc(r.title)}</h2>
+          <table>${r.scores.map((s, k) => `<tr><td>${esc((crit[r.project] || [])[k] || 'Critério ' + (k + 1))}</td><td><b>${s}</b> / 5</td></tr>`).join('')}
+          <tr><th>Soma</th><th>${r.total} pontos</th></tr></table></div>`}
+        ${pager(i, p.registros.length, 'rp')}`;
+      body.querySelectorAll('.rp').forEach(b => b.onclick = () => show(+b.dataset.p));
+      body.querySelector('#edp').onclick = () => profilePicker(body, p, async perfil => {
+        const r = await api('/api/admin/passports/' + encodeURIComponent(p.code) + '/perfil', { method: 'POST', body: JSON.stringify(perfil) });
+        if (r.status !== 200) return alert(r.data.erro);
+        const fresh = await fetch('/api/passports/' + encodeURIComponent(p.code)).then(r => r.json());
+        Object.assign(p, fresh); show(i);
+      }, 'Salvar');
+    };
+    show(0);
+  });
+}
+
+// ---------- Escolas, turmas e chamada para o ônibus ----------
+function escolas(c, list) {
+  c.innerHTML = `<form class="card" id="nsf"><h2>Cadastrar escola</h2>
+      <div class="row"><input name="name" placeholder="Nome da escola" style="flex:1" required><button>Adicionar</button></div><div id="em"></div></form>
+    <p class="muted">Escolas e turmas também podem ser cadastradas na hora de entregar o passaporte. Use <b>🚌 Chamar para o ônibus</b> quando um professor pedir: os visitantes daquela escola/turma recebem um aviso no celular, as avaliações deles são pausadas e atendentes e equipes dos estandes são avisados.</p>
+    ${list.map(sc => `<div class="card">
+      <div class="row" style="justify-content:space-between"><h2 style="margin:0">🏫 ${esc(sc.name)}</h2><span class="muted">${sc.passaportes} passaporte(s)</span></div>
+      ${sc.alertas.map(a => `<div class="busalert" style="border-radius:8px;margin:10px 0"><div class="bi">🚌</div>
+        <div><b>Chamada ativa${a.turma ? ' · turma ' + esc(a.turma) : ' · escola inteira'}</b><div>${esc(a.message)}</div><small>desde ${esc(a.created.slice(11, 16))} · avaliações pausadas</small></div>
+        <button class="sec end" data-id="${a.id}">Encerrar</button></div>`).join('')}
+      <div class="step"><b>Turmas</b>
+        ${sc.classes.length ? `<div class="chips">${sc.classes.map(t => `<span class="chip-btn" style="cursor:default">${esc(t.name)} · ${t.passaportes} <button class="sec delc" data-id="${t.id}" title="Excluir turma" aria-label="Excluir turma ${esc(t.name)}" style="padding:0 6px;margin-left:4px">✕</button></span>`).join('')}</div>` : '<p class="muted">Nenhuma turma.</p>'}
+        <div class="row"><input class="nt" data-s="${sc.id}" placeholder="Nova turma" style="flex:1"><button class="sec ntb" data-s="${sc.id}">+ Turma</button></div></div>
+      <div class="step row">
+        <button class="bus" data-s="${sc.id}" style="background:#c98a00">🚌 Chamar para o ônibus</button>
+        <button class="danger dels" data-id="${sc.id}" style="margin-left:auto">Excluir escola</button></div>
+    </div>`).join('') || '<p class="muted">Nenhuma escola cadastrada.</p>'}`;
+  const msg = t => document.getElementById('em').innerHTML = `<div class="msg err">${esc(t)}</div>`;
+  document.getElementById('nsf').onsubmit = async e => {
+    e.preventDefault();
+    const r = await api('/api/admin/schools', { method: 'POST', body: JSON.stringify({ name: new FormData(e.target).get('name') }) });
+    r.status === 200 ? render() : msg(r.data.erro);
+  };
+  c.querySelectorAll('.ntb').forEach(b => b.onclick = async () => {
+    const v = c.querySelector(`.nt[data-s="${b.dataset.s}"]`).value.trim(); if (!v) return;
+    const r = await api('/api/admin/classes', { method: 'POST', body: JSON.stringify({ school_id: +b.dataset.s, name: v }) });
+    r.status === 200 ? render() : alert(r.data.erro);
+  });
+  c.querySelectorAll('.delc').forEach(b => b.onclick = async () => {
+    if (!confirm('Excluir esta turma? Os passaportes dela continuam na escola, sem turma.')) return;
+    await api('/api/admin/classes/' + b.dataset.id, { method: 'DELETE' }); render();
+  });
+  c.querySelectorAll('.dels').forEach(b => b.onclick = async () => {
+    if (!confirm('Excluir esta escola e suas turmas? Os passaportes viram "visitante livre". As avaliações são mantidas.')) return;
+    await api('/api/admin/schools/' + b.dataset.id, { method: 'DELETE' }); render();
+  });
+  c.querySelectorAll('.end').forEach(b => b.onclick = () => encerrarAlerta(b.dataset.id));
+  c.querySelectorAll('.bus').forEach(b => b.onclick = () => chamarOnibus(list.find(x => x.id === +b.dataset.s)));
+}
+
+function chamarOnibus(sc) {
+  let cid = '';
+  openModal('', (body, close) => {
+    const draw = () => {
+      body.innerHTML = `<h2>🚌 Chamar para o ônibus</h2><p><b>${esc(sc.name)}</b></p>
+        ${sc.classes.length ? `<b>Quem deve voltar?</b>${chips('ct', [['', 'Escola inteira'], ...sc.classes.map(t => [String(t.id), 'Turma ' + t.name])], cid)}` : ''}
+        <label for="bm">Mensagem para os visitantes</label>
+        <textarea id="bm" rows="2" maxlength="300">Visitantes da ${esc(sc.name)}: retornem ao ônibus agora.</textarea>
+        <div class="msg info">Ao confirmar: os celulares desses visitantes mostram o aviso em tela cheia, as avaliações deles ficam pausadas e o aviso aparece para atendentes e equipes dos estandes.</div>
+        <div class="row"><button id="go" style="background:#c98a00">Enviar chamada</button><button class="sec" id="cn">Cancelar</button></div>`;
+      body.querySelectorAll('[data-ct]').forEach(b => b.onclick = () => { const m = body.querySelector('#bm').value; cid = b.dataset.ct; draw(); body.querySelector('#bm').value = m; });
+      body.querySelector('#cn').onclick = close;
+      body.querySelector('#go').onclick = async () => {
+        const r = await api('/api/admin/alerts', { method: 'POST', body: JSON.stringify({ school_id: sc.id, class_id: cid || null, message: body.querySelector('#bm').value }) });
+        if (r.status !== 200) return alert(r.data.erro);
+        close(); checarAlertas(); render();
+      };
+    };
+    draw();
+  });
+}
+async function encerrarAlerta(id) {
+  if (!confirm('Encerrar esta chamada? As avaliações dessa escola voltam a ser aceitas.')) return;
+  await api('/api/admin/alerts/' + id + '/encerrar', { method: 'POST', body: '{}' });
+  checarAlertas(); if (tab === 'escolas') render();
+}
+// aviso no topo do painel, em todas as abas (atendentes)
+let alertasVistos = '';
+async function checarAlertas() {
+  if (!PIN) return;
+  const r = await api('/api/admin/alerts');
+  if (r.status !== 200) return;
+  const bar = document.getElementById('alertbar');
+  bar.innerHTML = r.data.map(a => `<div class="busalert" role="alert"><div class="bi" aria-hidden="true">🚌</div>
+    <div><b>${esc(a.escola)}${a.turma ? ' · turma ' + esc(a.turma) : ''}: chamada para o ônibus</b><div>${esc(a.message)}</div>
+    <small>Desde ${esc(a.created.slice(11, 16))}. Avise os visitantes dessa escola que estiverem por perto.</small></div>
+    <button class="sec" data-end="${a.id}">Encerrar</button></div>`).join('');
+  bar.querySelectorAll('[data-end]').forEach(b => b.onclick = () => encerrarAlerta(b.dataset.end));
+  const k = r.data.map(a => a.id).join(',');
+  if (k && k !== alertasVistos && r.data.some(a => !alertasVistos.split(',').includes(String(a.id)))) {
+    try { const ac = new AudioContext(), o = ac.createOscillator(); o.connect(ac.destination); o.frequency.value = 880; o.start(); o.stop(ac.currentTime + .35); } catch {}
+  }
+  alertasVistos = k;
+}
+setInterval(checarAlertas, 3000);
+
+// ---------- Ranking ----------
+function ranking(c, all, st, courses) {
+  const list = all.filter(p => rankCourse === '' ? true : rankCourse === 'none' ? !p.course_id : String(p.course_id) === rankCourse);
+  const elig = list.filter(p => p.elegivel).sort((a, b) => b.media_geral - a.media_geral || b.avaliacoes - a.avaliacoes);
+  const rest = list.filter(p => !p.elegivel).sort((a, b) => (b.media_geral ?? -1) - (a.media_geral ?? -1));
+  let pos = 0, last = null;
+  const rows = elig.map((p, i) => { if (p.media_geral !== last) { pos = i + 1; last = p.media_geral; } return { ...p, pos }; });
+  const why = p => [p.por_avaliacoes && `${st.min_avaliacoes}+ avaliações`, p.por_nota && `média ≥ ${st.nota_minima}`].filter(Boolean).join(' e ');
+  const row = (p, ranked) => `<tr class="click" tabindex="0" data-code="${esc(p.code)}">
+    <td class="pos">${ranked ? p.pos + 'º' : '—'}</td>
+    <td><b>${esc(p.code)}</b> ${esc(p.title)}<div class="muted">${esc(p.team)}</div></td>
+    <td>${esc(p.course) || '<span class="muted">sem curso</span>'}</td>
+    <td><b>${p.media_geral ?? '—'}</b></td><td>${p.avaliacoes}</td><td>${p.soma}</td>
+    <td>${ranked ? `<span class="tag ok">${why(p)}</span>` : `<span class="muted">faltam ${Math.max(0, st.min_avaliacoes - p.avaliacoes)} aval. ou média ≥ ${st.nota_minima}</span>`}</td></tr>`;
+  const head = '<thead><tr><th>Posição</th><th>Projeto</th><th>Curso</th><th>Média</th><th>Avaliações</th><th>Soma</th><th>Regra atingida</th></tr></thead>';
+  const sel = courses.find(x => String(x.id) === rankCourse);
+  c.innerHTML = `<div class="card noprint"><div class="row" style="justify-content:space-between"><b>Filtrar por curso</b><button class="sec" onclick="print()">🖨 Imprimir</button></div>
+      ${chips('fc', courseOpts(courses), rankCourse)}</div>
+    <div class="card"><h2>🏆 Ranking${sel ? ' · ' + esc(sel.name) : rankCourse === 'none' ? ' · sem curso' : ' geral'}</h2>
+    <p class="muted">Classificação pela média geral. Empates ficam na mesma posição. Entram no ranking os projetos com <b>${st.min_avaliacoes}+ avaliações</b> <b>OU</b> <b>média ≥ ${st.nota_minima}</b>. O reconhecimento de cada posição é definido pelos professores. Clique em um projeto para ver os detalhes.</p>
+    ${rows.length ? `<table>${head}<tbody>${rows.map(p => row(p, true)).join('')}</tbody></table>` : '<div class="msg info">Nenhum projeto deste filtro atingiu as regras ainda.</div>'}</div>
+    ${rest.length ? `<div class="card"><h2>Ainda fora do ranking</h2><table>${head}<tbody>${rest.map(p => row(p, false)).join('')}</tbody></table></div>` : ''}`;
+  c.querySelectorAll('[data-fc]').forEach(b => b.onclick = () => { rankCourse = b.dataset.fc; ranking(c, all, st, courses); });
+  c.querySelectorAll('tr.click').forEach(tr => {
+    const p = list.find(x => x.code === tr.dataset.code);
+    const open = () => openModal(`<div class="muted">Projeto ${esc(p.code)} · ${esc(p.team)} · ${esc(p.course) || 'sem curso'}</div><h2>${esc(p.title)}</h2>
+      <p>Média geral <b>${p.media_geral ?? '—'}</b> · ${p.avaliacoes} avaliação(ões) · soma ${p.soma}</p>
+      <table>${p.criteria.map((cr, i) => `<tr><td>${esc(cr)}</td><td><b>${p.media_criterios[i] ?? '—'}</b></td></tr>`).join('')}</table>
+      <h2 style="margin-top:14px">Avaliações</h2>
+      ${p.registros.map(r => `<div>${esc(r.passport)} · [${r.scores.join(', ')}] · ${r.total} pts · <span class="muted">${esc(r.created)}</span></div>`).join('') || '<span class="muted">nenhuma</span>'}`);
+    tr.onclick = open; tr.onkeydown = e => { if (e.key === 'Enter') open(); }
+  });
+}
+
+// ---------- Cursos ----------
+function cursos(c, list) {
+  c.innerHTML = `<form class="card" id="nc"><h2>Cadastrar curso</h2>
+      <div class="row"><input name="name" placeholder="Ex.: Engenharia de Software" style="flex:1" required><button>Adicionar</button></div><div id="cm"></div></form>
+    <div class="card"><h2>Cursos (${list.length})</h2>
+      ${list.length ? `<table><thead><tr><th>Curso</th><th>Projetos</th><th></th></tr></thead><tbody>${list.map(x => `<tr>
+        <td><input value="${esc(x.name)}" data-id="${x.id}" class="cn"></td><td>${x.projetos}</td>
+        <td style="white-space:nowrap"><button class="sec sv" data-id="${x.id}">Salvar</button> <button class="danger dl" data-id="${x.id}">Excluir</button></td></tr>`).join('')}</tbody></table>`
+        : '<p class="muted">Nenhum curso cadastrado. Cadastre os cursos e vincule os projetos na Montagem avaliativa.</p>'}</div>`;
+  const msg = (t, ok) => document.getElementById('cm').innerHTML = `<div class="msg ${ok ? 'ok' : 'err'}">${esc(t)}</div>`;
+  document.getElementById('nc').onsubmit = async e => {
+    e.preventDefault();
+    const { status, data } = await api('/api/admin/courses', { method: 'POST', body: JSON.stringify({ name: new FormData(e.target).get('name') }) });
+    status === 200 ? render() : msg(data.erro);
+  };
+  c.querySelectorAll('.sv').forEach(b => b.onclick = async () => {
+    const name = c.querySelector(`.cn[data-id="${b.dataset.id}"]`).value;
+    const { status, data } = await api('/api/admin/courses', { method: 'POST', body: JSON.stringify({ id: +b.dataset.id, name }) });
+    status === 200 ? render() : msg(data.erro);
+  });
+  c.querySelectorAll('.dl').forEach(b => b.onclick = async () => {
+    if (!confirm('Excluir este curso? Os projetos vinculados ficam sem curso (as avaliações não são apagadas).')) return;
+    await api('/api/admin/courses/' + b.dataset.id, { method: 'DELETE' }); render();
+  });
+}
+
+// ---------- Montagem avaliativa (cards + modal + paginação) ----------
+function montagem(c, all, courses) {
+  const list = all.filter(p => montCourse === '' ? true : montCourse === 'none' ? !p.course_id : String(p.course_id) === montCourse);
+  const pages = Math.max(1, Math.ceil(list.length / PER_PAGE));
+  montPage = Math.min(montPage, pages - 1);
+  const slice = list.slice(montPage * PER_PAGE, (montPage + 1) * PER_PAGE);
+  c.innerHTML = `<div class="row" style="margin-bottom:10px"><span class="muted" style="flex:1">Clique em um projeto para ver e editar. Cada trabalho pode ter critérios próprios, todos com nota de 1 a 5.</span>
+</div>
+    ${courses.length ? chips('mc', courseOpts(courses), montCourse) : ''}
+    <div class="grid">
+      <button class="pcard new" id="novo"><span style="font-size:2rem">＋</span>Novo projeto</button>
+      ${slice.map(p => `<button class="pcard" data-code="${esc(p.code)}">
+        <span class="code">${esc(p.code)}</span><b>${esc(p.title)}</b>
+        <span class="muted">${esc(p.team) || 'sem equipe'}</span>
+        <span class="muted">📍 ${esc(p.location) || 'sem localização'}</span>
+        <span class="tag ${p.course ? 'ok' : 'no'}" style="align-self:flex-start">${esc(p.course) || 'sem curso'}</span>
+        <span class="muted">${p.criteria.length} critério(s) · ${p.avaliacoes} avaliação(ões)</span></button>`).join('')}
+    </div>${pager(montPage, pages, 'mp')}
+    <p class="muted" style="text-align:center">${list.length} projeto(s) cadastrado(s)</p>`;
+  c.querySelectorAll('.mp').forEach(b => b.onclick = () => { montPage = +b.dataset.p; montagem(c, all, courses); });
+  c.querySelectorAll('[data-mc]').forEach(b => b.onclick = () => { montCourse = b.dataset.mc; montPage = 0; montagem(c, all, courses); });
+  document.getElementById('novo').onclick = () => projectModal(null, courses);
+  c.querySelectorAll('.pcard[data-code]').forEach(b => b.onclick = () => projectModal(list.find(p => p.code === b.dataset.code), courses));
+}
+
+function projectModal(p, courses) {
+  const isNew = !p;
+  p = p || { code: '', title: '', team: '', summary: '', criteria: ['Clareza da explicação', 'Criatividade da proposta', 'Relevância ou utilidade'], avaliacoes: 0 };
+  openModal(`<form id="pf">
+      <h2>${isNew ? '➕ Novo projeto' : esc(p.code) + ' · ' + esc(p.title)}</h2>
+      ${isNew ? '' : `<p class="muted">${p.avaliacoes} avaliação(ões) · soma ${p.soma} · média ${p.media_geral ?? '—'}</p>`}
+      <div class="row"><div style="flex:1;min-width:110px"><label>Código</label><input name="code" value="${esc(p.code)}" ${isNew ? '' : 'readonly'} placeholder="P05" required></div>
+      <div style="flex:3;min-width:200px"><label>Título</label><input name="title" value="${esc(p.title)}" required></div></div>
+      <label>Equipe</label><input name="team" value="${esc(p.team)}">
+      <label>Localização (aparece para o visitante)</label><input name="location" value="${esc(p.location || '')}" placeholder="Ex.: pátio abaixo do bloco B · bloco E, 2º andar, sala 204" maxlength="200">
+      ${isNew ? '' : `<div class="loc" style="font-size:.95rem"><span aria-hidden="true">🔐</span><div><div class="muted">Código secreto do estande (vai no cartaz)</div>
+        <b class="code" id="tk">${esc(p.token)}</b> <button type="button" class="sec" id="ntk" style="margin-left:8px;padding:6px 10px">Gerar novo</button></div></div>
+      <div class="loc" style="font-size:.95rem;align-items:flex-start"><span aria-hidden="true">👥</span><div style="flex:1;min-width:0">
+        <div class="muted">Página da equipe (entregue só aos alunos deste projeto)</div>
+        <a id="tl" target="_blank" href="/equipe/${encodeURIComponent(p.team_token)}" style="word-break:break-all">${location.origin}/equipe/${esc(p.team_token)}</a>
+        <div class="row" style="margin-top:6px"><button type="button" class="sec" id="tq" style="padding:6px 10px">Mostrar QR</button>
+        <button type="button" class="sec" id="ntt" style="padding:6px 10px">Gerar novo link</button></div><div id="tqr" style="margin-top:6px"></div></div></div>`}
+      <label>Curso</label>
+      ${chips('course_id', [['', 'Sem curso'], ...courses.map(x => [String(x.id), x.name])],
+        isNew ? (montCourse === 'none' ? '' : montCourse) : String(p.course_id ?? ''), true)}
+      ${courses.length ? '' : '<p class="muted">Cadastre cursos na aba Cursos para poder vincular.</p>'}
+      <label>Resumo (aparece para o visitante)</label><textarea name="summary" rows="3">${esc(p.summary)}</textarea>
+      <label>Critérios de avaliação (um por linha, cada um vale de 1 a 5)</label>
+      <textarea name="criteria" rows="4">${esc(p.criteria.join('\n'))}</textarea>
+      ${p.avaliacoes ? '<p class="muted">Este projeto já tem avaliações: dá para renomear os critérios, mas não mudar a quantidade.</p>' : ''}
+      <div id="pm"></div>
+      <div class="row"><button type="submit">Salvar</button>${isNew ? '' : '<button type="button" class="danger" id="del">Excluir</button>'}</div>
+    </form>`, (body, close) => {
+    body.querySelector('#pf').onsubmit = async e => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const payload = { code: fd.get('code'), title: fd.get('title'), team: fd.get('team'), summary: fd.get('summary'), criteria: fd.get('criteria').split('\n'), course_id: fd.get('course_id') || null, location: fd.get('location') };
+      const { status, data } = await api('/api/admin/projects', { method: 'POST', body: JSON.stringify(payload) });
+      if (status === 200) { close(); render(); } else body.querySelector('#pm').innerHTML = `<div class="msg err">${esc(data.erro)}</div>`;
+    };
+    const ntk = body.querySelector('#ntk');
+    if (ntk) ntk.onclick = async () => {
+      if (!confirm('Gerar um novo código para este estande? O cartaz atual deixa de funcionar e precisa ser reimpresso.')) return;
+      const { status, data } = await api('/api/admin/projects/' + encodeURIComponent(p.code) + '/novo-codigo', { method: 'POST', body: '{}' });
+      if (status === 200) { body.querySelector('#tk').textContent = data.token; p.token = data.token; }
+    };
+    const tq = body.querySelector('#tq');
+    if (tq) tq.onclick = () => { const el = body.querySelector('#tqr'); el.innerHTML = ''; qr(el, body.querySelector('#tl').href, 150); };
+    const ntt = body.querySelector('#ntt');
+    if (ntt) ntt.onclick = async () => {
+      if (!confirm('Gerar um novo link da equipe? O link atual para de funcionar.')) return;
+      const { status, data } = await api('/api/admin/projects/' + encodeURIComponent(p.code) + '/novo-acesso-equipe', { method: 'POST', body: '{}' });
+      if (status === 200) { const a = body.querySelector('#tl'); a.href = '/equipe/' + data.team_token; a.textContent = location.origin + '/equipe/' + data.team_token; body.querySelector('#tqr').innerHTML = ''; }
+    };
+    const del = body.querySelector('#del');
+    if (del) del.onclick = async () => {
+      if (!confirm(`Excluir ${p.code} e TODAS as suas avaliações?`)) return;
+      await api('/api/admin/projects/' + encodeURIComponent(p.code), { method: 'DELETE' }); close(); render();
+    };
+  });
+}
+
+// ---------- Cartazes ----------
+function cartazes(c, list) {
+  c.innerHTML = `<div class="noprint row" style="margin-bottom:12px"><button onclick="print()">🖨 Imprimir cartazes</button>
+    <span class="muted">Um cartaz por estande. O QR e o código do estande são secretos: só quem está no estande consegue avaliar.</span></div>
+    <div class="row" style="align-items:stretch">${list.map(p => `<div class="card" style="flex:1;min-width:260px;text-align:center">
+      <div class="muted">${esc(p.course) || ''}</div>
+      <h2>${esc(p.title)}</h2><div class="muted">📍 ${esc(p.location)}</div>
+      <div class="qr" data-url="${location.origin}/avaliar/${encodeURIComponent(p.token)}" style="display:inline-block;margin:8px"></div>
+      <div class="muted">Avalie este projeto · código do estande</div><div class="code" style="font-size:2.4rem">${esc(p.token)}</div></div>`).join('')}</div>`;
+  c.querySelectorAll('.qr').forEach(el => qr(el, el.dataset.url, 160));
+}
+
+const urlPin = new URLSearchParams(location.search).get('pin');
+if (urlPin) { PIN = urlPin; sessionStorage.setItem('pin', PIN); history.replaceState(null, '', '/admin'); }
+PIN ? render() : login();
+</script>
+</body>
+</html>

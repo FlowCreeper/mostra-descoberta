@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mostra em Descoberta</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/infinite.js"></script>
+</head>
+<body>
+<header><h1>🔬 Mostra em Descoberta</h1><small>Passaporte de descoberta · Desafio Conheça três</small></header>
+<main id="app"></main>
+<div id="modal"></div>
+<div id="bus"></div>
+<script>
+const app = document.getElementById('app');
+const LABELS = ['Muito fraco', 'Fraco', 'Regular', 'Bom', 'Excelente'];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const store = {
+  get() { try { return localStorage.getItem('passaporte'); } catch { return null; } },
+  set(v) { try { v ? localStorage.setItem('passaporte', v) : localStorage.removeItem('passaporte'); } catch {} }
+};
+async function api(url, opts = {}) {
+  const r = await fetch(url, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  return { status: r.status, data: await r.json() };
+}
+const projectFromPath = () => (location.pathname.match(/^\/avaliar\/([\w-]+)/) || [])[1];
+
+// ---------- Início ----------
+function renderStart(next, err = '') {
+  app.innerHTML = `
+  <div class="card">
+    <h2>Bem-vindo(a)!</h2>
+    <p>Conheça os projetos da mostra e avalie cada um em critérios de <b>1 a 5</b>.
+    A cada avaliação completa seu passaporte ganha <b>1 assinatura</b>. Avalie <b>3 projetos diferentes</b> e receba o selo <b>Conheça três</b>.</p>
+    <p class="muted">O passaporte é entregue pela organização na entrada da mostra. O código é anônimo: não pedimos nome, e-mail nem telefone. Avalie com sinceridade, porque as notas ajudam as equipes a melhorar.</p>
+  </div>
+  <div class="card">
+    <h2>Ativar meu passaporte</h2>
+    <p class="muted">Leia o QR code do seu cartão ou digite o código impresso nele.</p>
+    <div class="row"><input id="cod" placeholder="MD-XXXXX" style="flex:1;text-transform:uppercase" autofocus><button id="usar">Começar</button></div>
+    <div id="m">${err ? `<div class="msg err">${esc(err)}</div>` : ''}</div>
+    <p class="muted">Não tem passaporte? Procure o balcão da organização.</p>
+  </div>`;
+  const usar = async () => {
+    const c = document.getElementById('cod').value.trim().toUpperCase();
+    const { status, data } = await api('/api/passports/' + encodeURIComponent(c) + '/ativar', { method: 'POST' });
+    if (status !== 200) return document.getElementById('m').innerHTML = `<div class="msg err">${esc(data.erro || 'Código inválido.')}</div>`;
+    store.set(c); next();
+  };
+  document.getElementById('usar').onclick = usar;
+  document.getElementById('cod').onkeydown = e => { if (e.key === 'Enter') usar(); }
+}
+
+// ---------- Passaporte ----------
+async function renderPassport(flash = '') {
+  const code = store.get();
+  const [{ status, data: p }, { data: projects }] = await Promise.all([api('/api/passports/' + code), api('/api/projects?passport=' + encodeURIComponent(code))]);
+  if (status !== 200) { store.set(null); return renderStart(() => renderPassport()); }
+  const done = new Set(p.registros.map(r => r.project));
+  const n = Math.min(p.assinaturas, p.meta);
+  const stamps = Array.from({ length: Math.max(p.meta, p.assinaturas) }, (_, i) => {
+    const r = p.registros[i];
+    return r ? `<div class="stamp on">✔<br>${esc(r.title)}</div>` : `<div class="stamp">Assinatura ${i + 1}</div>`;
+  }).join('');
+  app.innerHTML = `
+  ${flash}
+  ${p.concluido ? `<div class="card" style="text-align:center"><div class="selo">🏅</div><h2>Selo “Conheça três” conquistado!</h2>
+    <p>Você avaliou ${p.assinaturas} projetos. Mostre esta tela no balcão da organização para participar do sorteio da lembrancinha (uma participação por visitante).</p>
+    <p class="muted">Pode continuar avaliando outros projetos — suas opiniões seguem ajudando as equipes.</p></div>` : ''}
+  <div class="card">
+    <h2>Meu passaporte</h2>
+    <div class="muted">Código anônimo</div><div class="code">${esc(p.code)}</div>
+    ${p.escola ? `<div class="muted">🏫 ${esc(p.escola)}${p.turma ? ' · turma ' + esc(p.turma) : ''}</div>` : ''}
+    <p><b>${n} de ${p.meta}</b> projetos avaliados</p>
+    <div class="bar" role="progressbar" aria-valuenow="${n}" aria-valuemax="${p.meta}"><div style="width:${n / p.meta * 100}%"></div></div>
+    <div class="stamps">${stamps}</div>
+    ${!p.concluido ? `<p class="muted">Faltam ${p.meta - n} projeto(s) para o selo.</p>` : ''}
+  </div>
+  <div class="card">
+    <h2>Meus selos · ${p.total_selos} de ${p.selos.length}</h2>
+    <div class="badges">${p.selos.map(b => `<div class="badge ${b.conquistado ? 'on' : ''}" title="${esc(b.desc)}">
+      <div class="bi" aria-hidden="true">${b.conquistado ? b.icon : '🔒'}</div><b>${esc(b.name)}</b>
+      <span>${b.conquistado ? '✔ conquistado' : esc(b.desc)}</span></div>`).join('')}</div>
+    <p class="muted">Os selos dependem só de quais projetos você conheceu, nunca das notas que você deu.</p>
+  </div>
+  <div class="card">
+    <h2>Avaliar um projeto</h2>
+    <p class="muted">Vá até o estande e leia o <b>QR code do cartaz</b>, ou digite o <b>código do estande</b> impresso nele. Só dá para avaliar estando no projeto.</p>
+    <div class="row"><input id="pc" placeholder="Código do estande" maxlength="5" autocomplete="off" style="flex:1;text-transform:uppercase;letter-spacing:2px"><button id="abrir">Abrir</button></div>
+    <div id="pcm"></div>
+    <button class="sec" id="mapa" style="margin-top:12px;width:100%">🗺 Onde estão os projetos?</button>
+  </div>
+  <p class="muted" style="text-align:center"><a href="#" id="sair">Trocar de passaporte</a></p>`;
+  const abrir = () => {
+    const c = document.getElementById('pc').value.trim().toUpperCase();
+    if (c) go('/avaliar/' + encodeURIComponent(c));
+  };
+  document.getElementById('abrir').onclick = abrir;
+  document.getElementById('pc').onkeydown = e => { if (e.key === 'Enter') abrir(); };
+  document.getElementById('mapa').onclick = () => mapaModal(projects, done);
+  document.getElementById('sair').onclick = e => { e.preventDefault(); if (confirm('Sair deste passaporte? Anote o código ' + p.code + ' para voltar.')) { store.set(null); go('/'); } };
+}
+
+// ---------- Modal "Onde estão os projetos?" (sem acesso ao formulário) ----------
+function openModal(html, onReady) {
+  const m = document.getElementById('modal');
+  m.innerHTML = `<div class="modal-bg"><div class="modal" role="dialog" aria-modal="true"><button class="x" aria-label="Fechar">✕</button><div id="mb">${html}</div></div></div>`;
+  const close = () => { m.innerHTML = ''; document.removeEventListener('keydown', onKey); };
+  const onKey = e => { if (e.key === 'Escape') close(); };
+  document.addEventListener('keydown', onKey);
+  m.querySelector('.x').onclick = close;
+  m.querySelector('.modal-bg').onclick = e => { if (e.target.classList.contains('modal-bg')) close(); };
+  onReady && onReady(m.querySelector('#mb'), close);
+}
+function mapaModal(projects, done) {
+  openModal('', body => {
+    let filtro = '', scrollTop = 0;
+    const lista = () => {
+      body.innerHTML = `<h2>🗺 Onde estão os projetos?</h2>
+        <p class="muted">Toque em um projeto para ver onde ele está. Para avaliar, vá até o estande e leia o QR do cartaz.</p>
+        <input id="mf" placeholder="Buscar por nome, curso ou local…" value="${esc(filtro)}" style="margin-bottom:8px">
+        <div id="ml" style="max-height:55vh"></div>`;
+      const fil = () => projects.filter(p => [p.title, p.course, p.location, p.team].join(' ').toLowerCase().includes(filtro.toLowerCase()));
+      const inf = infiniteList(body.querySelector('#ml'), fil(), p => `<button class="mitem ${done.has(p.code) ? 'done' : ''}" data-code="${esc(p.code)}">
+          <b>${esc(p.title)}</b>${done.has(p.code) ? ' <span class="tag ok">✔ avaliado</span>' : ''}
+          <span class="muted">📍 ${esc(p.location) || 'local a definir'}${p.course ? ' · ' + esc(p.course) : ''}</span></button>`,
+        { batch: 15, empty: '<p class="muted">Nenhum projeto encontrado.</p>',
+          onRender: box => box.querySelectorAll('.mitem').forEach(b => b.onclick = () => { scrollTop = box.scrollTop; detalhe(projects.find(p => p.code === b.dataset.code)); }) });
+      body.querySelector('#ml').scrollTop = scrollTop;
+      const mf = body.querySelector('#mf');
+      mf.oninput = () => { filtro = mf.value; scrollTop = 0; inf.update(fil()); };
+    };
+    const detalhe = p => {
+      body.innerHTML = `<button class="sec" id="volta">← Voltar à lista</button>
+        <div class="muted" style="margin-top:12px">${esc(p.course) || ''}${p.team ? ' · ' + esc(p.team) : ''}</div>
+        <h2>${esc(p.title)}</h2>
+        <div class="loc"><span aria-hidden="true">📍</span><div><div class="muted">Onde fica</div><b>${esc(p.location) || 'Local ainda não informado. Pergunte à organização.'}</b></div></div>
+        <p>${esc(p.summary)}</p>
+        ${done.has(p.code) ? '<div class="msg ok">✔ Você já avaliou este projeto.</div>' : '<div class="msg info">Para avaliar, vá até o estande e leia o QR code do cartaz.</div>'}`;
+      body.querySelector('#volta').onclick = lista;
+    };
+    lista();
+  });
+}
+
+// ---------- Formulário de avaliação ----------
+async function renderForm(token) {
+  const passport = store.get();
+  const [{ status, data: pr }, { data: p }] = await Promise.all([
+    api('/api/estande/' + encodeURIComponent(token) + '?passport=' + encodeURIComponent(passport)), api('/api/passports/' + passport)]);
+  if (status !== 200) return app.innerHTML = `<div class="msg err">${esc(pr.erro)}</div><button onclick="go('/')">Voltar ao passaporte</button>`;
+  const already = p.registros.find(r => r.project === pr.code);
+  app.innerHTML = `
+  <div class="card">
+    <div class="muted">${pr.course ? esc(pr.course) + ' · ' : ''}${esc(pr.team)}</div>
+    <h2>${esc(pr.title)}</h2>
+    <p>${esc(pr.summary)}</p>
+  </div>
+  ${already ? `<div class="msg info">Você já avaliou este projeto com o passaporte ${esc(passport)} (${already.total} pontos). Cada passaporte avalia um projeto só uma vez.</div>` : ''}
+  <form class="card" id="f">
+    <h2>Sua avaliação</h2>
+    <p class="muted">Passaporte ${esc(passport)} · responda todos os critérios (1 = muito fraco, 5 = excelente).</p>
+    ${pr.criteria.map((c, i) => `<fieldset class="crit" style="border:0;margin:0;padding:10px 0">
+      <legend style="font-weight:600">${i + 1}. ${esc(c)}</legend>
+      <div class="scale">${[1,2,3,4,5].map(v => `<label><input type="radio" name="c${i}" value="${v}" required><span><b>${v}</b>${LABELS[v-1]}</span></label>`).join('')}</div>
+    </fieldset>`).join('')}
+    <div id="m"></div>
+    <div class="row"><button type="submit">Enviar avaliação</button><button type="button" class="sec" onclick="go('/')">Voltar</button></div>
+  </form>`;
+  document.getElementById('f').onsubmit = async e => {
+    e.preventDefault();
+    const scores = pr.criteria.map((_, i) => +(document.querySelector(`input[name=c${i}]:checked`)?.value || 0));
+    const m = document.getElementById('m');
+    if (scores.includes(0)) return m.innerHTML = '<div class="msg err">Responda todos os critérios para a avaliação ser válida.</div>';
+    const { status, data } = await api('/api/evaluate', { method: 'POST', body: JSON.stringify({ passport, estande: token, scores }) });
+    if (status === 201) {
+      history.pushState(null, '', '/');
+      const novos = (data.novos_selos || []).map(b => `<div class="msg ok newbadge"><span style="font-size:2rem">${b.icon}</span> Novo selo: <b>${esc(b.name)}</b>!<br><span class="muted">${esc(b.desc)}</span></div>`).join('');
+      renderPassport(`<div class="msg ok">✅ Avaliação registrada para “${esc(pr.title)}”! Seu passaporte ganhou 1 assinatura.</div>${novos}`);
+      window.scrollTo(0, 0);
+    } else m.innerHTML = `<div class="msg err">${esc(data.erro)}</div>`;
+  };
+}
+
+// ---------- Roteamento ----------
+function go(path) { history.pushState(null, '', path); route(); window.scrollTo(0, 0); }
+async function route() {
+  const qp = new URLSearchParams(location.search).get('p');
+  if (qp) {
+    history.replaceState(null, '', location.pathname);
+    const { status } = await api('/api/passports/' + encodeURIComponent(qp.toUpperCase()) + '/ativar', { method: 'POST' });
+    if (status !== 200) return renderStart(route, 'O código do QR não é um passaporte válido.');
+    store.set(qp.toUpperCase());
+  }
+  const proj = projectFromPath();
+  const show = () => proj ? renderForm(proj.toUpperCase()) : renderPassport();
+  store.get() ? show() : renderStart(show);
+}
+window.onpopstate = route;
+route();
+
+// ---------- Chamada para o ônibus (verifica a cada 5s) ----------
+let busVisto = '';
+async function checarOnibus() {
+  const code = store.get();
+  const el = document.getElementById('bus');
+  if (!code) { el.innerHTML = ''; return; }
+  const r = await fetch('/api/passports/' + encodeURIComponent(code)).then(r => r.ok ? r.json() : null).catch(() => null);
+  if (!r) return;
+  const a = r.alertas || [];
+  const chave = a.map(x => x.id).join(',');
+  if (!a.length) { el.innerHTML = ''; busVisto = ''; return; }
+  if (chave === busVisto && el.innerHTML) return;
+  const novo = chave !== busVisto;
+  busVisto = chave;
+  const x = a[0];
+  el.innerHTML = `<div class="busfull" role="alertdialog" aria-labelledby="bt">
+    <div class="bi" aria-hidden="true">🚌</div>
+    <h2 id="bt">Hora de voltar ao ônibus!</h2>
+    <p style="font-size:1.15rem">${esc(x.message)}</p>
+    <p>${esc(x.escola)}${x.turma ? ' · turma ' + esc(x.turma) : ''} · chamado às ${esc(x.created.slice(11, 16))}</p>
+    <p style="opacity:.9">As avaliações foram pausadas para a sua escola. Obrigado por participar!</p>
+    <button class="sec" id="bok">Entendi</button></div>`;
+  document.getElementById('bok').onclick = () => {
+    el.innerHTML = `<div class="busalert" role="alert" style="position:sticky;top:0;z-index:5"><div class="bi" aria-hidden="true">🚌</div>
+      <div><b>Retorne ao ônibus</b><div>${esc(x.message)}</div></div></div>`;
+  };
+  if (novo && navigator.vibrate) navigator.vibrate([300, 150, 300]);
+}
+checarOnibus();
+setInterval(checarOnibus, 5000);
+</script>
+</body>
+</html>

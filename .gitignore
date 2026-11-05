@@ -1,0 +1,9 @@
+# dados locais (contêm PIN e avaliações)
+mostra.db
+mostra.db-journal
+backups/
+# execução
+server.log
+.server.pid
+__pycache__/
+*.pyc
