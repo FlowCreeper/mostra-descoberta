@@ -13,7 +13,7 @@ DB_PATH = os.path.join(BASE, "mostra.db")
 STATIC = os.path.join(BASE, "static")
 ADMIN_PIN = os.environ.get("ADMIN_PIN", "2026")  # PIN inicial; depois pode ser trocado no painel
 META = 3  # projetos para concluir o desafio
-DEFAULT_SETTINGS = {"min_avaliacoes": 10, "nota_minima": 4.5}
+DEFAULT_SETTINGS = {"min_avaliacoes": 10, "nota_minima": 4.5, "min_avaliacoes_nota": 4}
 DEFAULT_CRITERIA = ["Clareza da explicação", "Criatividade da proposta", "Relevância ou utilidade"]
 lock = threading.Lock()
 RESERVA_SEG = 180
@@ -47,6 +47,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS alerts(id INTEGER PRIMARY KEY AUTOINCREMENT,
             school_id INTEGER NOT NULL REFERENCES schools(id), class_id INTEGER REFERENCES classes(id),
             message TEXT NOT NULL, created TEXT DEFAULT (datetime('now','localtime')), ended TEXT);
+        CREATE TABLE IF NOT EXISTS raffles(id INTEGER PRIMARY KEY AUTOINCREMENT,
+            passport TEXT NOT NULL REFERENCES passports(code), prize TEXT NOT NULL, pickup TEXT NOT NULL,
+            created TEXT DEFAULT (datetime('now','localtime')), claimed TEXT);
         CREATE TABLE IF NOT EXISTS courses(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE);
         CREATE TABLE IF NOT EXISTS admin(id INTEGER PRIMARY KEY CHECK(id=1), pin TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value REAL NOT NULL);
@@ -99,6 +102,7 @@ def get_settings(con):
     for r in con.execute("SELECT key, value FROM settings"):
         s[r[0]] = r[1]
     s["min_avaliacoes"] = int(s["min_avaliacoes"])
+    s["min_avaliacoes_nota"] = int(s["min_avaliacoes_nota"])
     return s
 
 
@@ -133,6 +137,12 @@ def active_alerts(con, school_id=None, class_id=None):
         sql += " AND a.school_id=? AND (a.class_id IS NULL OR a.class_id=?)"
         args = [school_id, class_id]
     return [dict(r) for r in con.execute(sql + " ORDER BY a.id DESC", args)]
+
+
+def raffle_pool(con):
+    """Quem concorre ao sorteio: avaliou ao menos META projetos e ainda não ganhou (uma participação por visitante)."""
+    return [r[0] for r in con.execute("""SELECT passport FROM evaluations GROUP BY passport HAVING COUNT(*) >= ?
+        AND passport NOT IN (SELECT passport FROM raffles) ORDER BY passport""", (META,))]
 
 
 def project_row(r, admin=False):
@@ -206,6 +216,8 @@ def passport_data(con, code):
     return {"code": code, "emitido": pp["created"], "ativado": pp["activated"],
             "school_id": pp["school_id"], "class_id": pp["class_id"], "escola": pp["escola"], "turma": pp["turma"],
             "alertas": alertas, "bloqueado": bool(alertas), "assinaturas": len(regs), "meta": META,
+            "premios": [dict(r) for r in con.execute(
+                "SELECT id, prize, pickup, created, claimed FROM raffles WHERE passport=? ORDER BY id", (code,))],
             "concluido": len(regs) >= META, "registros": regs,
             "selos": selos, "total_selos": sum(b["conquistado"] for b in selos)}
 
@@ -317,7 +329,8 @@ class Handler(BaseHTTPRequestHandler):
             r = con.execute("""SELECT (SELECT COUNT(*) FROM passports), (SELECT COUNT(activated) FROM passports),
                 (SELECT IFNULL(MAX(id), 0) FROM evaluations), (SELECT COUNT(*) FROM evaluations),
                 (SELECT COUNT(school_id) || '.' || IFNULL(SUM(school_id), 0) || '.' || IFNULL(SUM(class_id), 0) FROM passports),
-                (SELECT COUNT(*) || '.' || COUNT(ended) FROM alerts)""").fetchone()
+                (SELECT COUNT(*) || '.' || COUNT(ended) FROM alerts),
+                (SELECT COUNT(*) || '.' || COUNT(claimed) FROM raffles)""").fetchone()
             res = reservas_ativas()
             return self.send(200, {"versao": "-".join(map(str, r)) + "|" + ",".join(sorted(res)), "reservados": sorted(res)})
         if p == "/api/admin/passports":
@@ -342,7 +355,8 @@ class Handler(BaseHTTPRequestHandler):
                     "media_geral": round(soma / (n * len(pr["criteria"])), 2) if n else None,
                     "media_criterios": [round(x / n, 2) if n else None for x in per],
                     "por_avaliacoes": n >= st["min_avaliacoes"],
-                    "por_nota": bool(n) and soma / (n * len(pr["criteria"])) >= st["nota_minima"],
+                    # regra da nota só vale com um mínimo de avaliações (evita 1 pessoa dar 5 e o projeto entrar)
+                    "por_nota": n >= st["min_avaliacoes_nota"] and soma / (n * len(pr["criteria"])) >= st["nota_minima"],
                     "registros": [{"passport": e["passport"], "scores": json.loads(e["scores"]),
                                    "total": e["total"], "created": e["created"]} for e in evs]})
                 pr["elegivel"] = pr["por_avaliacoes"] or pr["por_nota"]
@@ -360,6 +374,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, get_settings(con))
         if p == "/api/admin/alerts":
             return self.send(200, active_alerts(con))
+        if p == "/api/admin/sorteios":
+            return self.send(200, {"elegiveis": len(raffle_pool(con)), "sorteios": [dict(r) for r in con.execute(
+                """SELECT r.*, s.name AS escola, c.name AS turma FROM raffles r JOIN passports p ON p.code=r.passport
+                LEFT JOIN schools s ON s.id=p.school_id LEFT JOIN classes c ON c.id=p.class_id ORDER BY r.id DESC""")]})
         if p == "/api/admin/schools":
             out = []
             for s_ in con.execute("SELECT id, name FROM schools ORDER BY name").fetchall():
@@ -443,12 +461,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not self.is_admin():
                     return self.send(401, {"erro": "PIN inválido"})
                 try:
-                    mi = int(data["min_avaliacoes"]); nm = float(data["nota_minima"])
-                    assert mi >= 1 and 1 <= nm <= 5
+                    mi = int(data["min_avaliacoes"]); nm = float(data["nota_minima"]); mn = int(data["min_avaliacoes_nota"])
+                    assert mi >= 1 and 1 <= nm <= 5 and 1 <= mn
                 except Exception:
-                    return self.send(400, {"erro": "Use mínimo de avaliações ≥ 1 e nota mínima entre 1 e 5."})
+                    return self.send(400, {"erro": "Use mínimos de avaliações ≥ 1 e nota mínima entre 1 e 5."})
                 con.execute("INSERT OR REPLACE INTO settings VALUES('min_avaliacoes', ?)", (mi,))
                 con.execute("INSERT OR REPLACE INTO settings VALUES('nota_minima', ?)", (nm,))
+                con.execute("INSERT OR REPLACE INTO settings VALUES('min_avaliacoes_nota', ?)", (mn,))
                 return self.send(200, get_settings(con))
             if p == "/api/evaluate":
                 return self.evaluate(con, data)
@@ -503,6 +522,22 @@ class Handler(BaseHTTPRequestHandler):
                 except sqlite3.IntegrityError:
                     return self.send(409, {"erro": "Essa escola já tem uma turma com esse nome."})
                 return self.send(200, {"ok": True, "id": cur.lastrowid})
+            if p == "/api/admin/sorteios":
+                prize = str(data.get("prize", "")).strip()[:120]
+                pickup = str(data.get("pickup", "")).strip()[:200] or "Balcão da organização"
+                if not prize:
+                    return self.send(400, {"erro": "Informe o prêmio."})
+                pool = raffle_pool(con)
+                if not pool:
+                    return self.send(409, {"erro": "Ninguém pode concorrer: é preciso ter avaliado 3 projetos e ainda não ter sido sorteado."})
+                winner = secrets.choice(pool)
+                con.execute("INSERT INTO raffles(passport, prize, pickup) VALUES(?,?,?)", (winner, prize, pickup))
+                return self.send(200, {"ok": True, "ganhador": passport_data(con, winner), "concorreram": len(pool)})
+            m = re.fullmatch(r"/api/admin/sorteios/(\d+)/(retirado|desfazer)", p)
+            if m:
+                con.execute("UPDATE raffles SET claimed=? WHERE id=?",
+                            (time.strftime("%Y-%m-%d %H:%M:%S") if m[2] == "retirado" else None, int(m[1])))
+                return self.send(200, {"ok": True})
             if p == "/api/admin/alerts":
                 try:
                     sid = int(data.get("school_id"))

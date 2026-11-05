@@ -109,11 +109,14 @@ function indicador(c, d) {
     <div class="bar" style="margin-top:14px"><div style="width:${d.percentual}%"></div></div>
     <p class="muted">Fórmula: (visitantes com 3 ou mais avaliações válidas ÷ total de passaportes emitidos) × 100.</p></div>
   <form class="card" id="cfg"><h2>Regras para o reconhecimento</h2>
-    <p class="muted">Um projeto concorre se atingir <b>qualquer uma</b> das duas regras. Assim um projeto pouco visitado, mas muito bem avaliado, não fica de fora. Defina as regras antes da mostra.</p>
-    <div class="row">
-      <div style="flex:1;min-width:200px"><label>Mínimo de avaliações</label><input name="min_avaliacoes" type="number" min="1" value="${d.min_avaliacoes}"></div>
-      <div style="flex:1;min-width:200px"><label>OU média geral mínima (1 a 5)</label><input name="nota_minima" type="number" min="1" max="5" step="0.1" value="${d.nota_minima}"></div>
-    </div><div id="cm"></div><br><button>Salvar regras</button></form>
+    <p class="muted">Um projeto concorre se atingir <b>qualquer uma</b> das duas regras. Assim um projeto pouco visitado, mas muito bem avaliado, não fica de fora. A regra da nota exige um mínimo de avaliações para que uma única pessoa dando 5 em tudo não coloque o projeto no ranking. Defina as regras antes da mostra.</p>
+    <div class="step"><b>Regra 1 · por participação</b>
+      <div class="row"><div style="flex:1;min-width:200px"><label>Mínimo de avaliações</label><input name="min_avaliacoes" type="number" min="1" value="${d.min_avaliacoes}"></div></div></div>
+    <div class="step"><b>OU Regra 2 · por nota</b>
+      <div class="row">
+        <div style="flex:1;min-width:200px"><label>Média geral mínima (1 a 5)</label><input name="nota_minima" type="number" min="1" max="5" step="0.1" value="${d.nota_minima}"></div>
+        <div style="flex:1;min-width:200px"><label>E pelo menos quantas avaliações</label><input name="min_avaliacoes_nota" type="number" min="1" value="${d.min_avaliacoes_nota}"></div>
+      </div></div><div id="cm"></div><br><button>Salvar regras</button></form>
   <div class="card" style="max-width:340px" id="pinbox"></div>`;
   let first = null;
   const askNew = (msg = '') => {
@@ -134,7 +137,7 @@ function indicador(c, d) {
   document.getElementById('cfg').onsubmit = async e => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    const { status, data } = await api('/api/admin/settings', { method: 'POST', body: JSON.stringify({ min_avaliacoes: +fd.get('min_avaliacoes'), nota_minima: +fd.get('nota_minima') }) });
+    const { status, data } = await api('/api/admin/settings', { method: 'POST', body: JSON.stringify({ min_avaliacoes: +fd.get('min_avaliacoes'), nota_minima: +fd.get('nota_minima'), min_avaliacoes_nota: +fd.get('min_avaliacoes_nota') }) });
     document.getElementById('cm').innerHTML = status === 200 ? '<div class="msg ok">Regras salvas.</div>' : `<div class="msg err">${esc(data.erro)}</div>`;
   };
 }
@@ -152,6 +155,7 @@ function passaportes(c, list, projects) {
       <div class="pass"><b>🔬 Mostra em Descoberta</b><div class="muted">Passaporte de descoberta</div>
       <div class="qr" data-url="${location.origin}/?p=${code}" style="display:inline-block;margin:6px"></div>
       <div class="code" style="font-size:1.2rem">${code}</div><div class="muted">Avalie 3 projetos e ganhe o selo!</div></div>`).join('')}</div></div>` : ''}
+    <div class="card noprint" id="sorteio"></div>
     <div class="card noprint"><div class="row"><input id="q" placeholder="Buscar por código MD-…, escola ou turma" value="${esc(q)}" style="flex:1">
       <span class="live" title="Atualiza sozinho a cada 2 segundos">● ao vivo</span></div></div>
     <div class="card noprint"><div class="row" style="justify-content:space-between"><h2 id="hd" style="margin:0"></h2>
@@ -182,7 +186,7 @@ function passaportes(c, list, projects) {
     infUso = infiniteList(document.getElementById('uso'), uso, p => `<div class="urow" role="button" tabindex="0" data-code="${esc(p.code)}">
         <span class="code" style="font-size:1rem">${esc(p.code)}</span>
         <span class="muted">ativado ${esc(p.ativado.slice(11, 16))}${p.escola ? `<br>🏫 ${esc(p.escola)}${p.turma ? ' · ' + esc(p.turma) : ''}` : ''}</span>
-        <span>${p.assinaturas} / ${p.meta}</span>
+        <span>${p.assinaturas} / ${p.meta}${(p.premios || []).length ? ' 🎁' : ''}</span>
         <span>${p.total_selos ? p.selos.filter(b => b.conquistado).map(b => `<span title="${esc(b.name)}">${b.icon}</span>`).join(' ') : '<span class="tag no">sem selos</span>'}</span>
         <span class="muted">${p.registros.map(r => esc(r.project)).join(', ') || 'nenhuma avaliação'}</span></div>`,
       { batch: 25, empty: '<p class="muted">Nenhum passaporte em uso ainda.</p>',
@@ -199,6 +203,7 @@ function passaportes(c, list, projects) {
   };
   document.getElementById('q').oninput = fill;
   fill();
+  carregarSorteio();
   // ---- tempo real: consulta leve a cada 2s; só recarrega a lista quando algo muda
   let versao = null;
   pollTimer = setInterval(async () => {
@@ -207,10 +212,58 @@ function passaportes(c, list, projects) {
     if (status !== 200) return;
     if (data.versao !== versao) {
       const r = await api('/api/admin/passports');
-      if (r.status === 200 && document.getElementById('disp')) { list = r.data; fill(); }
+      if (r.status === 200 && document.getElementById('disp')) { list = r.data; fill(); carregarSorteio(); }
     }
     versao = data.versao;
   }, 2000);
+}
+
+// ---------- Sorteio entre quem concluiu o desafio ----------
+let sorteioForm = { prize: '', pickup: 'Balcão da organização, bloco A' };
+async function carregarSorteio(forcar = false) {
+  const el = document.getElementById('sorteio');
+  if (!el) return;
+  const { status, data } = await api('/api/admin/sorteios');
+  if (status !== 200) return;
+  const ae = document.activeElement;
+  if (!forcar && ae && ae.tagName === 'INPUT' && el.contains(ae)) return; // não redesenha enquanto o atendente digita
+  el.innerHTML = `<div class="row" style="justify-content:space-between"><h2 style="margin:0">🎁 Sorteio</h2>
+      <span class="tag ${data.elegiveis ? 'ok' : 'no'}">${data.elegiveis} passaporte(s) concorrendo</span></div>
+    <p class="muted">Concorrem os passaportes que avaliaram 3 ou mais projetos e ainda não foram sorteados (uma participação por visitante). O ganhador vê o prêmio no próprio passaporte.</p>
+    <div class="row">
+      <div style="flex:2;min-width:200px"><label for="sp">Prêmio</label><input id="sp" placeholder="Ex.: kit de lembrancinhas" value="${esc(sorteioForm.prize)}" maxlength="120"></div>
+      <div style="flex:3;min-width:220px"><label for="sl">Onde retirar</label><input id="sl" value="${esc(sorteioForm.pickup)}" maxlength="200"></div>
+    </div>
+    <div class="row" style="margin-top:10px"><button id="sortear" ${data.elegiveis ? '' : 'disabled'}>🎲 Sortear</button><div id="sm" style="flex:1"></div></div>
+    ${data.sorteios.length ? `<div class="step"><b>Ganhadores (${data.sorteios.length})</b>
+      <div id="glist" style="max-height:260px"></div></div>` : ''}`;
+  const sp = el.querySelector('#sp'), sl = el.querySelector('#sl');
+  sp.oninput = () => sorteioForm.prize = sp.value; sl.oninput = () => sorteioForm.pickup = sl.value;
+  el.querySelector('#sortear').onclick = async () => {
+    if (!sp.value.trim()) { el.querySelector('#sm').innerHTML = '<div class="msg err">Informe o prêmio.</div>'; return sp.focus(); }
+    if (!confirm(`Sortear "${sp.value}" entre ${data.elegiveis} passaporte(s)?`)) return;
+    const r = await api('/api/admin/sorteios', { method: 'POST', body: JSON.stringify({ prize: sp.value, pickup: sl.value }) });
+    if (r.status !== 200) { el.querySelector('#sm').innerHTML = `<div class="msg err">${esc(r.data.erro)}</div>`; return; }
+    const g = r.data.ganhador;
+    sorteioForm.prize = '';
+    openModal(`<div style="text-align:center"><div style="font-size:4rem" aria-hidden="true">🎉</div>
+      <div class="muted">Ganhador entre ${r.data.concorreram} passaporte(s)</div>
+      <div class="code" style="font-size:2.4rem">${esc(g.code)}</div>
+      <p>${g.escola ? `🏫 ${esc(g.escola)}${g.turma ? ' · ' + esc(g.turma) : ''}` : '🙋 Visitante livre'} · ${g.assinaturas} projetos avaliados</p>
+      <p>Prêmio: <b>${esc(r.data.ganhador.premios.at(-1).prize)}</b></p>
+      <p class="muted">O aviso já aparece no passaporte do visitante, com o local de retirada.</p></div>`);
+    carregarSorteio(true);
+  };
+  const gl = el.querySelector('#glist');
+  if (gl) infiniteList(gl, data.sorteios, x => `<div class="urow" style="grid-template-columns:110px 1fr 1fr 150px;cursor:default">
+      <span class="code" style="font-size:1rem">${esc(x.passport)}</span>
+      <span><b>${esc(x.prize)}</b><br><span class="muted">sorteado ${esc(x.created.slice(11, 16))}${x.escola ? ' · ' + esc(x.escola) : ''}</span></span>
+      <span class="muted">📍 ${esc(x.pickup)}</span>
+      <span>${x.claimed ? `<span class="tag ok">✔ retirado ${esc(x.claimed.slice(11, 16))}</span> <button class="sec sx" data-id="${x.id}" data-a="desfazer" style="padding:3px 8px" title="Desfazer">↶</button>`
+        : `<button class="sx" data-id="${x.id}" data-a="retirado" style="padding:6px 10px">Marcar retirado</button>`}</span></div>`,
+    { batch: 20, onRender: box => box.querySelectorAll('.sx').forEach(b => b.onclick = async () => {
+      await api(`/api/admin/sorteios/${b.dataset.id}/${b.dataset.a}`, { method: 'POST', body: '{}' }); carregarSorteio(true);
+    }) });
 }
 
 let modalPoll = null;
@@ -314,6 +367,7 @@ function passportModal(p, crit) {
           ${p.bloqueado ? '<span class="tag" style="background:#fff1c2;color:#4a3500">🚌 chamado ao ônibus · avaliações pausadas</span>' : ''}</p>
         <p>${p.assinaturas} assinatura(s) · ${p.concluido ? '<span class="tag ok">🏅 Conheça três</span>' : '<span class="tag no">desafio em andamento</span>'}</p>
         <p>Selos (${p.total_selos}): ${p.selos.filter(b => b.conquistado).map(b => `<span class="tag ok" title="${esc(b.desc)}">${b.icon} ${esc(b.name)}</span>`).join(' ') || '<span class="muted">nenhum</span>'}</p>
+        ${(p.premios || []).map(x => `<p>🎁 Sorteado: <b>${esc(x.prize)}</b> · ${x.claimed ? '<span class="tag ok">retirado</span>' : '<span class="tag" style="background:#fff1c2;color:#4a3500">aguardando retirada</span>'}</p>`).join('')}
         ${!r ? '<p class="muted">Este passaporte ainda não fez nenhuma avaliação.</p>' : `
         <div class="card" style="box-shadow:none;border:1px solid #d5dfe0">
           <div class="muted">Registro ${i + 1} · ${esc(r.created)}</div>
@@ -426,19 +480,19 @@ function ranking(c, all, st, courses) {
   const rest = list.filter(p => !p.elegivel).sort((a, b) => (b.media_geral ?? -1) - (a.media_geral ?? -1));
   let pos = 0, last = null;
   const rows = elig.map((p, i) => { if (p.media_geral !== last) { pos = i + 1; last = p.media_geral; } return { ...p, pos }; });
-  const why = p => [p.por_avaliacoes && `${st.min_avaliacoes}+ avaliações`, p.por_nota && `média ≥ ${st.nota_minima}`].filter(Boolean).join(' e ');
+  const why = p => [p.por_avaliacoes && `${st.min_avaliacoes}+ avaliações`, p.por_nota && `média ≥ ${st.nota_minima} com ${st.min_avaliacoes_nota}+ aval.`].filter(Boolean).join(' e ');
   const row = (p, ranked) => `<tr class="click" tabindex="0" data-code="${esc(p.code)}">
     <td class="pos">${ranked ? p.pos + 'º' : '—'}</td>
     <td><b>${esc(p.code)}</b> ${esc(p.title)}<div class="muted">${esc(p.team)}</div></td>
     <td>${esc(p.course) || '<span class="muted">sem curso</span>'}</td>
     <td><b>${p.media_geral ?? '—'}</b></td><td>${p.avaliacoes}</td><td>${p.soma}</td>
-    <td>${ranked ? `<span class="tag ok">${why(p)}</span>` : `<span class="muted">faltam ${Math.max(0, st.min_avaliacoes - p.avaliacoes)} aval. ou média ≥ ${st.nota_minima}</span>`}</td></tr>`;
+    <td>${ranked ? `<span class="tag ok">${why(p)}</span>` : `<span class="muted">${(p.media_geral ?? 0) >= st.nota_minima ? `média ok, faltam ${st.min_avaliacoes_nota - p.avaliacoes} aval. para a regra da nota` : `faltam ${Math.max(0, st.min_avaliacoes - p.avaliacoes)} aval. ou média ≥ ${st.nota_minima} com ${st.min_avaliacoes_nota}+ aval.`}</span>`}</td></tr>`;
   const head = '<thead><tr><th>Posição</th><th>Projeto</th><th>Curso</th><th>Média</th><th>Avaliações</th><th>Soma</th><th>Regra atingida</th></tr></thead>';
   const sel = courses.find(x => String(x.id) === rankCourse);
   c.innerHTML = `<div class="card noprint"><div class="row" style="justify-content:space-between"><b>Filtrar por curso</b><button class="sec" onclick="print()">🖨 Imprimir</button></div>
       ${chips('fc', courseOpts(courses), rankCourse)}</div>
     <div class="card"><h2>🏆 Ranking${sel ? ' · ' + esc(sel.name) : rankCourse === 'none' ? ' · sem curso' : ' geral'}</h2>
-    <p class="muted">Classificação pela média geral. Empates ficam na mesma posição. Entram no ranking os projetos com <b>${st.min_avaliacoes}+ avaliações</b> <b>OU</b> <b>média ≥ ${st.nota_minima}</b>. O reconhecimento de cada posição é definido pelos professores. Clique em um projeto para ver os detalhes.</p>
+    <p class="muted">Classificação pela média geral. Empates ficam na mesma posição. Entram no ranking os projetos com <b>${st.min_avaliacoes}+ avaliações</b> <b>OU</b> <b>média ≥ ${st.nota_minima} com pelo menos ${st.min_avaliacoes_nota} avaliações</b>. O reconhecimento de cada posição é definido pelos professores. Clique em um projeto para ver os detalhes.</p>
     ${rows.length ? `<table>${head}<tbody>${rows.map(p => row(p, true)).join('')}</tbody></table>` : '<div class="msg info">Nenhum projeto deste filtro atingiu as regras ainda.</div>'}</div>
     ${rest.length ? `<div class="card"><h2>Ainda fora do ranking</h2><table>${head}<tbody>${rest.map(p => row(p, false)).join('')}</tbody></table></div>` : ''}`;
   c.querySelectorAll('[data-fc]').forEach(b => b.onclick = () => { rankCourse = b.dataset.fc; ranking(c, all, st, courses); });

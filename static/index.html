@@ -14,6 +14,7 @@
 <script>
 const app = document.getElementById('app');
 const LABELS = ['Muito fraco', 'Fraco', 'Regular', 'Bom', 'Excelente'];
+let premiosVistos = null; // prêmios do sorteio já mostrados na tela
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const store = {
   get() { try { return localStorage.getItem('passaporte'); } catch { return null; } },
@@ -62,10 +63,19 @@ async function renderPassport(flash = '') {
     const r = p.registros[i];
     return r ? `<div class="stamp on">✔<br>${esc(r.title)}</div>` : `<div class="stamp">Assinatura ${i + 1}</div>`;
   }).join('');
+  premiosVistos = JSON.stringify(p.premios || []);
   app.innerHTML = `
   ${flash}
+  ${(p.premios || []).map(pr => `<div class="card prize" role="status">
+    <div class="selo" aria-hidden="true">${pr.claimed ? '🎁' : '🎉'}</div>
+    <h2>${pr.claimed ? 'Prêmio retirado' : 'Você foi sorteado!'}</h2>
+    <p style="font-size:1.15rem">Prêmio: <b>${esc(pr.prize)}</b></p>
+    ${pr.claimed ? `<p class="muted">✔ Retirado em ${esc(pr.claimed.slice(11, 16))}. Obrigado por participar!</p>`
+      : `<div class="loc"><span aria-hidden="true">📍</span><div><div class="muted">Retire na universidade</div><b>${esc(pr.pickup)}</b></div></div>
+         <p>Mostre esta tela e o código <b class="code" style="font-size:1.1rem">${esc(p.code)}</b> para retirar.</p>`}
+  </div>`).join('')}
   ${p.concluido ? `<div class="card" style="text-align:center"><div class="selo">🏅</div><h2>Selo “Conheça três” conquistado!</h2>
-    <p>Você avaliou ${p.assinaturas} projetos. Mostre esta tela no balcão da organização para participar do sorteio da lembrancinha (uma participação por visitante).</p>
+    <p>Você avaliou ${p.assinaturas} projetos e já está participando do sorteio da lembrancinha (uma participação por visitante). Se for sorteado, o prêmio aparece aqui no passaporte.</p>
     <p class="muted">Pode continuar avaliando outros projetos — suas opiniões seguem ajudando as equipes.</p></div>` : ''}
   <div class="card">
     <h2>Meu passaporte</h2>
@@ -207,6 +217,14 @@ async function checarOnibus() {
   if (!code) { el.innerHTML = ''; return; }
   const r = await fetch('/api/passports/' + encodeURIComponent(code)).then(r => r.ok ? r.json() : null).catch(() => null);
   if (!r) return;
+  // sorteio: se mudou e o visitante está na tela do passaporte, atualiza a tela
+  const pv = JSON.stringify(r.premios || []);
+  if (premiosVistos !== null && pv !== premiosVistos && !projectFromPath()) {
+    premiosVistos = pv;
+    const novo = (r.premios || []).some(x => !x.claimed);
+    renderPassport(novo ? '<div class="msg ok newbadge">🎉 Novidade no seu passaporte: você ganhou o sorteio!</div>' : '');
+    if (novo && navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 400]);
+  }
   const a = r.alertas || [];
   const chave = a.map(x => x.id).join(',');
   if (!a.length) { el.innerHTML = ''; busVisto = ''; return; }

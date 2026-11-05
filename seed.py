@@ -58,7 +58,7 @@ class Seed:
         self.t0 = (datetime.now() - timedelta(hours=inicio_horas)).replace(second=0, microsecond=0)
         self.cursos, self.escolas, self.turmas = {}, {}, {}
         self.criterios, self.gens, self.cont = {}, {}, {}
-        self.avals, self.n_pass, self.rotulos = [], 0, {}
+        self.avals, self.n_pass, self.rotulos, self.premios = [], 0, {}, []
 
     def add_cursos(self, nomes=CURSOS):
         for c in nomes:
@@ -132,10 +132,22 @@ class Seed:
                           msg or f"{turma or escola}: retornem ao ônibus no estacionamento principal.", fmt(criado),
                           fmt(criado + timedelta(minutes=encerrado_min)) if encerrado_min else None))
 
+    def sorteio(self, premio, retirado=False, minutos=230, local="Balcão da organização, bloco A"):
+        """Agenda um sorteio (feito depois das avaliações gravadas, entre quem concluiu o desafio)."""
+        self.premios.append((premio, local, retirado, minutos))
+
     def gravar(self):
         for quando, code, proj, sc in sorted(self.avals):  # ordem cronológica
             self.con.execute("INSERT INTO evaluations(passport, project, scores, total, created) VALUES(?,?,?,?,?)",
                              (code, proj, json.dumps(sc), sum(sc), fmt(quando)))
+        for premio, local, retirado, minutos in self.premios:
+            pool = server.raffle_pool(self.con)
+            if not pool:
+                continue
+            quando = self.t0 + timedelta(minutes=minutos)
+            self.con.execute("INSERT INTO raffles(passport, prize, pickup, created, claimed) VALUES(?,?,?,?,?)",
+                             (self.rng.choice(pool), premio, local, fmt(quando),
+                              fmt(quando + timedelta(minutes=12)) if retirado else None))
 
 
 PERFIS_MISTOS = ((None, None), ("Escola Estadual Alfa", "9º ano A"), ("Escola Estadual Alfa", "9º ano B"),
@@ -144,11 +156,15 @@ PERFIS_MISTOS = ((None, None), ("Escola Estadual Alfa", "9º ano A"), ("Escola E
 
 # ---------------------------------------------------------------- cenários
 def c_completo(s):
-    """Tudo junto: todos os casos de ranking, selos, perfis e chamada de ônibus num banco só."""
+    """Tudo junto: todos os casos de ranking, selos, perfis e chamada de ônibus num banco só.
+    Nota alta com poucas avaliações fica FORA (P10: 1 pessoa deu 5; P03: 3 avaliações; P15: 2).
+    Dois sorteios: um prêmio já retirado e um aguardando retirada."""
     s.gens.update({"P01": ("alvo", 4.1), "P02": ("alvo", 4.8), "P03": ("fixo", [[5, 5, 5], [5, 5, 4], [5, 5, 5]]),
                    "P04": ("alvo", 3.5), "P05": ("alvo", 3.9), "P06": ("alvo", 2.3), "P07": ("fixo", [[3, 2, 3]]),
-                   "P08": ("constante", 4), "P09": ("constante", 4), "P10": ("constante", 5), "P11": ("alvo", 4.7),
-                   "P12": ("alvo", 3.0), "P13": ("alvo", 4.0), "P14": ("alvo", 3.6), "P15": ("fixo", [[5, 4, 5], [4, 5, 4]])})
+                   "P08": ("constante", 4), "P09": ("constante", 4), "P10": ("constante", 5),
+                   "P11": ("fixo", [[5, 5, 4], [5, 4, 5], [4, 5, 5], [5, 5, 5], [5, 4, 5], [4, 5, 4]]),  # 6 aval, 4,67: entra pela nota
+                   "P12": ("fixo", [[5, 4, 5], [4, 5, 4], [5, 4, 5], [4, 5, 4]]),  # 4 aval, 4,5 exata: entra pela nota (limite)
+                   "P13": ("alvo", 4.0), "P14": ("alvo", 3.6), "P15": ("fixo", [[5, 4, 5], [4, 5, 4]])})
     s.add_cursos(); s.add_projetos(); s.add_escolas()
     cotas = {"P01": 14, "P02": 12, "P03": 3, "P04": 10, "P05": 9, "P06": 2, "P07": 1, "P08": 11, "P09": 11,
              "P10": 1, "P11": 6, "P12": 4, "P13": 7, "P14": 5, "P15": 2}
@@ -156,6 +172,8 @@ def c_completo(s):
     s.disponiveis(15)
     s.alerta("Escola Estadual Alfa", "9º ano A", minutos=230)
     s.alerta("Colégio Beta", minutos=120, encerrado_min=15)
+    s.sorteio("Kit de lembrancinhas da mostra", retirado=True, minutos=150)
+    s.sorteio("Camiseta da mostra", minutos=200)
 
 
 def c_antes(s):
@@ -178,22 +196,23 @@ def c_inicio(s):
 
 
 def c_ranking(s):
-    """Regras de reconhecimento nos limites: exatamente 10 avaliações, 9, média exatamente 4,5, 4,44,
-    empate triplo (inclusive entre cursos) e projeto de 2 e de 4 critérios. Todos visitantes livres."""
+    """Regras de reconhecimento nos limites: exatamente 10 avaliações (entra), 9 (fora), média 4,5 exata
+    com 4 avaliações (entra), média 4,44 (fora), nota 5 com só 1 e com 3 avaliações (fora: falta o mínimo
+    da regra da nota), empate triplo entre cursos e projeto de 2 e de 4 critérios. Todos visitantes livres."""
     s.gens.update({
         "P01": ("constante", 3),                                   # 10 aval, média 3,0 -> entra por avaliações (limite)
         "P02": ("constante", 3),                                   # 9 aval, média 3,0 -> fica de fora por 1
-        "P03": ("fixo", [[5, 4, 5], [4, 5, 4]]),                   # 2 aval, média 4,5 exata -> entra pela nota (limite)
+        "P03": ("fixo", [[5, 4, 5], [4, 5, 4]]),                   # 4 aval, média 4,5 exata -> entra pela nota (limite)
         "P04": ("fixo", [[5, 4, 4], [4, 5, 4], [5, 4, 5]]),        # 3 aval, média 4,44 -> fica de fora por pouco
         "P05": ("constante", 4), "P08": ("constante", 4), "P11": ("constante", 4),  # empate triplo 4,0 (12 aval cada)
-        "P09": ("constante", 5),                                   # 1 aval, 2 critérios, média 5 -> 1º lugar pela nota
+        "P09": ("constante", 5),                                   # 1 aval, média 5 (1 pessoa deu 5) -> fica FORA
+        "P15": ("constante", 5),                                   # 3 aval, média 5 -> fica FORA (falta 1 avaliação)
         "P06": ("alvo", 2.0),                                      # 12 aval, média baixa -> entra por avaliações, último
         "P14": ("constante", 2),                                   # 0 avaliações
     })
-    s.add_cursos(); s.add_projetos(["P01", "P02", "P03", "P04", "P05", "P06", "P08", "P09", "P11", "P14"])
-    cotas = {"P01": 10, "P02": 9, "P03": 2, "P04": 3, "P05": 12, "P08": 12, "P11": 12, "P09": 1, "P06": 12, "P14": 0}
-    del cotas["P14"]
-    s.distribuir(cotas, [6] * 4 + [5] * 6 + [3] * 5 + [2] * 2)
+    s.add_cursos(); s.add_projetos(["P01", "P02", "P03", "P04", "P05", "P06", "P08", "P09", "P11", "P14", "P15"])
+    cotas = {"P01": 10, "P02": 9, "P03": 4, "P04": 3, "P05": 12, "P08": 12, "P11": 12, "P09": 1, "P06": 12, "P15": 3}
+    s.distribuir(cotas, [6] * 4 + [5] * 7 + [3] * 5 + [2] * 2)
     s.disponiveis(10)
 
 
@@ -262,7 +281,7 @@ def c_lotado(s):
 
 def c_fim(s):
     """Fim da mostra com meta batida: todos os passaportes entregues, ~75% concluíram o desafio
-    (meta hipotética é 60%), nenhuma chamada de ônibus ativa."""
+    (meta hipotética é 60%), nenhuma chamada de ônibus ativa, 4 sorteios feitos (3 prêmios retirados, 1 pendente)."""
     s.add_cursos(); s.add_projetos(); s.add_escolas()
     codigos = [p[0] for p in CATALOGO]
     for i in range(40):
@@ -270,6 +289,8 @@ def c_fim(s):
         esc, tur = PERFIS_MISTOS[i % len(PERFIS_MISTOS)]
         s.passaporte(s.rng.sample(codigos, n), esc, tur, gap_min=5)
     s.alerta("Colégio Beta", minutos=180, encerrado_min=10)
+    for i, premio in enumerate(["Kit de lembrancinhas", "Camiseta da mostra", "Caneca personalizada", "Livro de divulgação científica"]):
+        s.sorteio(premio, retirado=i < 3, minutos=200 + 5 * i)
 
 
 CENARIOS = {
@@ -313,7 +334,7 @@ def resumo(con, nome, s, pin):
     st = server.get_settings(con)
     print(f"\n== cenário: {nome} ==\n{CENARIOS[nome].__doc__.strip()}\n")
     print(f"PIN do painel: {pin or server.ADMIN_PIN}{' (mantido)' if pin else ' (padrão)'}"
-          f"   ·   regras: {st['min_avaliacoes']}+ avaliações OU média ≥ {st['nota_minima']}")
+          f"   ·   regras: {st['min_avaliacoes']}+ avaliações OU média ≥ {st['nota_minima']} com {st['min_avaliacoes_nota']}+ avaliações")
     rows = con.execute("""SELECT p.code, p.title, p.criteria, COUNT(e.id) n, SUM(e.total) s FROM projects p
         LEFT JOIN evaluations e ON e.project=p.code GROUP BY p.code ORDER BY p.code""").fetchall()
     if len(rows) <= 16:
@@ -322,7 +343,7 @@ def resumo(con, nome, s, pin):
             n, nc = r["n"], len(json.loads(r["criteria"]))
             media = round(r["s"] / (n * nc), 2) if n else None
             regra = "+".join(x for x, ok in [("aval", n >= st["min_avaliacoes"]),
-                                             ("nota", bool(n) and media >= st["nota_minima"])] if ok) or "-"
+                                             ("nota", n >= st["min_avaliacoes_nota"] and media >= st["nota_minima"])] if ok) or "-"
             print(f"{r['code']:5}{n:>5}{str(media):>7}  {regra:10} {r['title']}")
     else:
         print(f"\n{len(rows)} projetos")
@@ -342,6 +363,8 @@ def resumo(con, nome, s, pin):
             selos = " ".join(b["icon"] for b in d["selos"] if b["conquistado"]) or "—"
             print(f"{code:11} {rot[:48]:48} {selos}")
         print("(abra no celular: /?p=CÓDIGO para entrar com o passaporte)")
+    for r in con.execute("SELECT passport, prize, claimed FROM raffles ORDER BY id"):
+        print(f"Sorteio: {r['prize']} -> {r['passport']} ({'retirado' if r['claimed'] else 'aguardando retirada'})")
     al = server.active_alerts(con)
     if al:
         print("\nChamadas de ônibus ativas: " + "; ".join(f"{a['escola']}{' · ' + a['turma'] if a['turma'] else ' (escola inteira)'}" for a in al))
