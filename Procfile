@@ -1,1 +1,1 @@
-web: python server.py
+web: python seed.py ${SEED_CENARIO:-completo} --se-vazio; python server.py

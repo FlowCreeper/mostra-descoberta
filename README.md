@@ -36,12 +36,31 @@ PIN inicial do painel: `2026` (pode ser trocado no próprio painel, aba Indicado
 - Chamada para o ônibus: a organização chama uma escola ou turma; os celulares desses visitantes mostram o aviso, as avaliações deles ficam pausadas e atendentes e equipes são avisados.
 - Nenhum dado pessoal do visitante é coletado.
 
-## Dados de demonstração
+## Seeds (um por cenário)
 
-`python3 seed.py` recria o banco com 15 projetos, 5 cursos, 4 escolas e 43 passaportes cobrindo
-os cenários do sistema (elegível por avaliações, por média, nos limites, empate, critérios
-personalizados, todos os selos, chamada de ônibus ativa e encerrada…). O resumo impresso no
-final mostra a situação de cada projeto e os links das equipes.
+```bash
+python3 seed.py               # lista os cenários
+python3 seed.py <cenário>     # recria o banco com o cenário (faz backup em backups/ e mantém o PIN)
+./restart.sh
+```
+
+| Cenário | Para testar |
+|---|---|
+| `completo` | tudo junto num banco só |
+| `antes-da-mostra` | telas vazias: 50 passaportes impressos, nenhum entregue, sem avaliações |
+| `inicio` | primeira meia hora: poucos visitantes, ninguém concluiu, ranking vazio |
+| `ranking` | regras nos limites: exatamente 10 avaliações, 9, média 4,5 exata, 4,44, empate triplo |
+| `sem-ranking` | fim da mostra sem nenhum projeto elegível |
+| `selos` | um passaporte para cada selo, com rótulos (inclui os 10 pioneiros e um não pioneiro) |
+| `onibus` | chamada ativa para uma turma, para uma escola inteira, chamada encerrada e turmas não chamadas |
+| `lotado` | volume: 30 projetos, 600 passaportes, ~1.600 avaliações (rolagem infinita e paginação) |
+| `fim-da-mostra` | meta batida: ~75% concluíram o desafio |
+
+O resumo impresso no final mostra a situação de cada projeto e, nos cenários `selos` e
+`onibus`, o código e a situação de cada passaporte (entre como visitante com `/?p=CÓDIGO`).
+
+Opções: `--reset-pin` volta o PIN para o padrão; `--se-vazio` só popula se o banco estiver vazio
+(usado no `Procfile`, com o cenário definido pela variável `SEED_CENARIO`).
 
 ## Acesso pelo celular
 
